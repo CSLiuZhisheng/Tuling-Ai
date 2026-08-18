@@ -64,6 +64,7 @@ def get_user(db: Session, username: str) -> UserInDB | None:
     if model is None:
         return None
     return UserInDB(
+        id=model.id,
         username=model.username,
         email=model.email,
         full_name=model.full_name,
@@ -114,6 +115,7 @@ def to_public_user(user: UserInDB | User) -> User:
     """
     if isinstance(user, UserInDB):
         return User(
+            id=user.id,
             username=user.username,
             email=user.email,
             full_name=user.full_name,

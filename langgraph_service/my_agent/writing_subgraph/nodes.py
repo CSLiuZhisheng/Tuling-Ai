@@ -54,7 +54,7 @@ def get_llm() -> ChatOpenAI:
 # ==============================
 # 节点实现
 # ==============================
-def understand(state: WritingState) -> WritingState:
+async def understand(state: WritingState) -> WritingState:
     """
     需求理解节点：分析用户写作需求，提取关键信息，并判断需求是否清晰。
 
@@ -124,7 +124,7 @@ CLEAR 或 UNCLEAR（必须二选一，不要输出其他内容）
 ## 用户需求
 {full_query}"""
 
-    result = str(llm.invoke(prompt).content)
+    result = str((await llm.ainvoke(prompt)).content)
     logger.info(f"[understand] LLM 原始输出 | result={result[:200]}...")
 
     # 解析 LLM 输出
@@ -178,7 +178,7 @@ CLEAR 或 UNCLEAR（必须二选一，不要输出其他内容）
     }
 
 
-def ask_clarification(state: WritingState) -> WritingState:
+async def ask_clarification(state: WritingState) -> WritingState:
     """
     澄清提问节点：向用户提问以获取更清晰的需求描述。
 
@@ -240,7 +240,7 @@ def clarification_router(state: WritingState) -> Literal["research", "ask_clarif
     return "research"
 
 
-def research(state: WritingState) -> WritingState:
+async def research(state: WritingState) -> WritingState:
     """
     信息收集节点：根据需求搜索相关资料。
 
@@ -257,7 +257,7 @@ def research(state: WritingState) -> WritingState:
     # 提取关键词进行搜索（限制长度避免过长）
     search_query = query
     try:
-        search_result = web_search.invoke(search_query)
+        search_result = await web_search.ainvoke(search_query)
         logger.info(f"[research] 搜索完成 | 结果长度={len(str(search_result))}")
     except Exception as e:
         # 搜索失败时的降级处理
@@ -267,7 +267,7 @@ def research(state: WritingState) -> WritingState:
     return {"research_notes": str(search_result)}
 
 
-def outline(state: WritingState) -> WritingState:
+async def outline(state: WritingState) -> WritingState:
     """
     大纲规划节点：根据需求和资料生成文章大纲。
 
@@ -299,12 +299,12 @@ def outline(state: WritingState) -> WritingState:
 
 请输出大纲："""
 
-    result = str(llm.invoke(prompt).content)
+    result = str((await llm.ainvoke(prompt)).content)
     logger.info(f"[outline] 大纲生成完成 | 大纲长度={len(result)}")
     return {"outline": result}
 
 
-def draft(state: WritingState) -> WritingState:
+async def draft(state: WritingState) -> WritingState:
     """
     章节写作节点：根据大纲生成完整草稿。
 
@@ -343,12 +343,12 @@ def draft(state: WritingState) -> WritingState:
 
 请输出完整文章："""
 
-    result = str(llm.invoke(prompt).content)
+    result = str((await llm.ainvoke(prompt)).content)
     logger.info(f"[draft] 草稿生成完成 | 草稿长度={len(result)}")
     return {"draft": result}
 
 
-def review(state: WritingState) -> WritingState:
+async def review(state: WritingState) -> WritingState:
     """
     审稿检查节点：对草稿进行质量审核。
 
@@ -390,7 +390,7 @@ def review(state: WritingState) -> WritingState:
 注意：只输出修改意见和"VERDICT: PASS"或者"VERDICT: REVISE"，不要输出其他内容。
 """
 
-    result = str(llm.invoke(prompt).content)
+    result = str((await llm.ainvoke(prompt)).content)
     # 判断审核是否通过
     passed = "VERDICT: PASS" in result.upper()
     logger.info(f"[review] 审稿完成 | passed={passed}")
@@ -403,7 +403,7 @@ def review(state: WritingState) -> WritingState:
     }
 
 
-def human_review(state: WritingState) -> WritingState:
+async def human_review(state: WritingState) -> WritingState:
     """
     人机交互节点：暂停执行，等待用户审阅草稿。
 
@@ -472,7 +472,7 @@ def human_review(state: WritingState) -> WritingState:
         }
 
 
-def revise(state: WritingState) -> WritingState:
+async def revise(state: WritingState) -> WritingState:
     """
     修订节点：根据审核意见修改草稿。
 
@@ -506,12 +506,12 @@ def revise(state: WritingState) -> WritingState:
 
 请输出修订后的完整文章："""
 
-    result = str(llm.invoke(prompt).content)
+    result = str((await llm.ainvoke(prompt)).content)
     logger.info(f"[revise] 修订完成 | 修订后草稿长度={len(result)}")
     return {"draft": result}
 
 
-def format_output(state: WritingState) -> WritingState:
+async def format_output(state: WritingState) -> WritingState:
     """
     格式化输出节点：对最终内容进行格式优化，并作为子图的最终输出。
 
@@ -528,23 +528,10 @@ def format_output(state: WritingState) -> WritingState:
     """
     draft_text = state.get("human_edited_content") or state.get("draft", "")
     logger.info(f"[format_output] 开始格式化并输出 | 草稿长度={len(draft_text)}")
-    llm = get_llm()
-
-    prompt = f"""请对以下文章进行最终的格式优化：
-
-1. 确保 Markdown 格式规范
-2. 检查标题层级
-3. 优化段落间距
-4. 确保列表格式正确
-
-## 文章内容
-{draft_text}
-
-请输出格式优化后的完整文章（仅输出文章内容，不要添加额外说明）："""
-
-    result = str(llm.invoke(prompt).content)
-    logger.info(f"[format_output] 格式化完成 | 输出长度={len(result)}")
-    logger.info(f"[format_output] 输出前100字: {result[:100]}...")
+    # 草稿已经经过需求分析、审稿和人工确认，不再发起一次完整文章重写。
+    # 这次调用会显著增加恢复流程耗时，也会导致前端收到重复文章。
+    result = draft_text
+    logger.info(f"[format_output] 直接输出已确认内容 | 输出长度={len(result)}")
 
     # 作为子图最终输出，封装成主图期望的格式
     return {
@@ -596,4 +583,3 @@ def human_review_router(state: WritingState) -> Literal["draft", "format_output"
         return "draft"
     logger.info(f"[human_review_router] 用户操作={action} → format_output")
     return "format_output"
-

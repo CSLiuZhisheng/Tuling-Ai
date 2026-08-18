@@ -25,7 +25,7 @@ def get_llm() -> ChatOpenAI:
 
 # 用于短期记忆摘要的模型。
 # 这里绑定更小的 max_tokens，避免摘要本身过长。
-summarization_model = get_llm().bind(max_tokens=128)
+summarization_model = get_llm().bind(max_tokens=512)
 
 # 官方风格的短期记忆摘要节点：
 # - 当历史消息过长时，自动把旧消息压缩成 running summary
@@ -70,73 +70,49 @@ def get_model_messages(state: GraphState) -> list:
     return list(state.get("messages", []))
 
 
-def intent_router(state: GraphState) -> GraphState:
+def is_writing_request(query: str) -> bool:
+    """快速识别明确的写作请求，避免普通聊天额外调用分类模型。"""
+    normalized_query = query.strip().lower()
+    writing_markers = (
+        "帮我写", "请写", "写一", "写个", "写篇", "写封", "写段",
+        "生成", "创作", "撰写", "改写", "润色", "翻译", "编写",
+        "写代码", "写个程序", "写一个程序", "write ", "translate ",
+    )
+    return any(marker in normalized_query for marker in writing_markers)
+
+
+async def intent_router(state: GraphState) -> GraphState:
     """主智能体：识别当前请求应路由到知识库、写作还是闲聊。"""
     # 如果前端显式指定了 knowledge_bool，直接按用户意图路由
     knowledge_bool = state.get("knowledge_bool")
     if knowledge_bool is True:
         return {"intent": "knowledge"}
     if knowledge_bool is False:
-        # 用户关闭知识库，只在 writing 和 chat 之间选择
+        # 用户关闭知识库时，普通聊天不应先等待一次分类模型调用。
+        # 明确的写作指令仍进入写作工作流，其余请求直接交给聊天节点。
         query = get_latest_user_query(state)
-        llm = get_llm()
-        prompt = f"""### 角色设定
-            你是一个高精准度的意图识别专家。将用户输入归类到以下两个模块之一。
-
-            ### 模块定义
-            1. **writing (创作文案)**：涉及文本生成、润色、翻译、代码编写或创意写作请求。
-               - 关键特征：用户明确要求"写"、"创作"、"生成"、"撰写"某些内容
-               - 示例："帮我写一篇文章"、"写一个故事"、"生成一份报告"、"帮我写代码"、"创作一首诗"
-            2. **chat (闲聊互动)**：涉及情感咨询、日常问候、主观观点交流或无明确任务指向的交谈。
-               - 关键特征：用户在聊天、问问题、寻求建议，而不是要求创作内容
-               - 示例："你好"、"今天心情不好"、"你觉得怎么样"、"给我讲个笑话"
-
-            ### 强制约束
-            - 只输出 [writing, chat] 中的一个，严禁包含任何解释。
-            - 如果用户明确要求"写"某些内容，必须输出 writing。
-
-            ### 待处理输入
-            用户问题：{query}
-
-            ### 最终指令
-            输出意图标签："""
-        result = str(llm.invoke(prompt).content).strip().lower()
-        if "writing" in result or "写作" in result:
-            intent = "writing"
-        else:
-            intent = "chat"
-        return {"intent": intent}
+        return {"intent": "writing" if is_writing_request(query) else "chat"}
 
     # knowledge_bool 未设置，走原有 LLM 意图识别
     query = get_latest_user_query(state)
     llm = get_llm()
-    prompt = f"""### 角色设定
-你是一个高精准度的意图识别主控专家。你的任务是分析用户的输入，并将其归类到指定的三个功能模块之一。
+    prompt = f"""将用户问题分类为以下三个类别之一：
 
-### 模块定义
-1. **knowledge (知识检索)**：
-   - 涉及事实性问题、百科知识、学术定义或需要查阅外部资料的情况。
-   - 示例："量子纠缠是什么？"、"帮我查一下去年的GDP数据"。
-2. **writing (创作文案)**：
-   - 涉及文本生成、润色、翻译、代码编写或创意写作请求。
-   - 关键特征：用户明确要求"写"、"创作"、"生成"、"撰写"某些内容
-   - 示例："帮我写一封辞职信"、"把这段话翻译成英文"、"写一个Python爬虫"、"帮我写一篇文章"、"创作一首诗"、"生成一份报告"
-3. **chat (闲聊互动)**：
-   - 涉及情感咨询、日常问候、主观观点交流或无明确任务指向的交谈。
-   - 关键特征：用户在聊天、问问题、寻求建议，而不是要求创作内容
-   - 示例："你好呀"、"你今天心情怎么样？"、"你觉得人工智能会取代人类吗？"、"给我讲个笑话"
+            knowledge：知识查询、事实问题、需要外部资料。
+            writing：写作、生成、改写、润色、翻译、代码编写。
+            chat：闲聊、观点交流、简单建议。
 
-### 强制约束
-- **唯一输出**：只能输出单词 [knowledge, writing, chat] 中的一个，严禁包含任何解释、标点或引言。
-- **写作优先**：如果用户明确要求"写"某些内容，必须输出 writing。
-- **缺省处理**：如果意图模糊，请优先选择最接近的分类；若完全无法判断，默认输出 chat。
+            规则：
+            - 明确要求写/生成/翻译/润色 -> writing
+            - 知识查询/事实问题 -> knowledge
+            - 其他 -> chat
 
-### 待处理输入
-用户问题：{query}
+            用户问题：
+            {query}
 
-### 最终指令
-输出意图标签："""
-    result = str(llm.invoke(prompt).content).strip().lower()
+            只输出：
+            knowledge / writing / chat"""
+    result = str((await llm.ainvoke(prompt)).content).strip().lower()
     if "writing" in result or "写作" in result:
         intent = "writing"
     elif "knowledge" in result or "知识" in result or "检索" in result:
@@ -229,10 +205,10 @@ def knowledge_guard(state: GraphState) -> Literal["fallback_search", "finalize"]
     return "finalize"
 
 
-def fallback_search_agent(state: GraphState) -> GraphState:
+async def fallback_search_agent(state: GraphState) -> GraphState:
     """搜索兜底节点。"""
     query = get_latest_user_query(state)
-    note = web_search.invoke(query)
+    note = await web_search.ainvoke(query)
     return {
         "answer": note,
         "sources": [],
@@ -241,7 +217,7 @@ def fallback_search_agent(state: GraphState) -> GraphState:
     }
 
 
-def chat_agent(state: GraphState) -> GraphState:
+async def chat_agent(state: GraphState) -> GraphState:
     """
     普通聊天节点。
 
@@ -260,7 +236,11 @@ def chat_agent(state: GraphState) -> GraphState:
         *get_model_messages(state),
     ]
     print(f"[DEBUG] chat_agent: {prompt_messages}")
-    answer = str(llm.invoke(prompt_messages).content)
+    answer_parts: list[str] = []
+    async for chunk in llm.astream(prompt_messages):
+        if chunk.content:
+            answer_parts.append(str(chunk.content))
+    answer = "".join(answer_parts)
     return {
         "answer": answer,
         "sources": [],
@@ -298,7 +278,7 @@ def finalize(state: GraphState) -> GraphState:
 # 需要通过包装函数手动调用子图，并进行状态转换。
 
 
-def call_writing_subgraph(state: GraphState) -> dict:
+async def call_writing_subgraph(state: GraphState) -> dict:
     """
     写作子图包装函数：调用写作子工作流。
 
@@ -329,7 +309,7 @@ def call_writing_subgraph(state: GraphState) -> dict:
     }
 
     # 调用子图
-    subgraph_output = writing_subgraph.invoke(subgraph_input)
+    subgraph_output = await writing_subgraph.ainvoke(subgraph_input)
 
     # 将子图输出映射回父图状态
     print(f"[writing_workflow] 子图执行完成 | answer长度={len(subgraph_output.get('answer', ''))}")

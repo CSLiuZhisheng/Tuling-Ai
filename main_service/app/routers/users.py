@@ -118,6 +118,7 @@ async def register_user(user: UserCreate, db: Session = Depends(get_db)) -> User
         role=user.role or "user",
     )
     return User(
+        id=created.id,
         username=created.username,
         email=created.email,
         full_name=created.full_name,
@@ -209,6 +210,7 @@ async def update_user_me(
         full_name=user_update.full_name,
     )
     return User(
+        id=updated.id,
         username=updated.username,
         email=updated.email,
         full_name=updated.full_name,
@@ -240,6 +242,7 @@ async def get_all_users(
 ) -> dict:
     users = [
         User(
+            id=user.id,
             username=user.username,
             email=user.email,
             full_name=user.full_name,
@@ -314,6 +317,7 @@ async def admin_create_user(
         role=user.role or "user",
     )
     return User(
+        id=created.id,
         username=created.username,
         email=created.email,
         full_name=created.full_name,
@@ -347,6 +351,7 @@ async def admin_update_user(
         hashed_password=hashed_password,
     )
     return User(
+        id=updated.id,
         username=updated.username,
         email=updated.email,
         full_name=updated.full_name,

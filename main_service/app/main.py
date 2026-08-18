@@ -35,12 +35,12 @@ def _ensure_role_column():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 先确保数据库表结构完整（包括 role 列）
-    _ensure_role_column()
+    # 新库先按 ORM 模型建表；旧库再补充可能缺失的 role 列。
     Base.metadata.create_all(bind=engine)
+    _ensure_role_column()
     db = SessionLocal()
     try:
-        root_user = db.get(UserModel, "root")
+        root_user = db.query(UserModel).filter(UserModel.username == "root").first()
         if root_user is None:
             db.add(
                 UserModel(

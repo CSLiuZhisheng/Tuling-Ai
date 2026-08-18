@@ -17,7 +17,8 @@ class UserModel(Base):
 
     用于替代原先的内存字典 `fake_users_db`。
     存储内容包括：
-    - username: 主键，用户名
+    - id: 稳定的用户 UUID，主键
+    - username: 唯一登录名
     - email/full_name: 用户资料
     - hashed_password: 哈希后的密码
     - disabled: 是否禁用
@@ -26,7 +27,8 @@ class UserModel(Base):
     """
     __tablename__ = "users"
 
-    username: Mapped[str] = mapped_column(String(64), primary_key=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid)
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     hashed_password: Mapped[str] = mapped_column(Text, nullable=False)

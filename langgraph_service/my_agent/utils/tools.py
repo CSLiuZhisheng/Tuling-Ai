@@ -68,10 +68,10 @@ tavily_search = TavilySearch(
 
 
 @tool
-def web_search(query: str) -> str:
+async def web_search(query: str) -> str:
     """搜索互联网上的公开信息，用于知识库不足时补充事实。"""
     try:
-        results = tavily_search.invoke({"query": query})
+        results = await tavily_search.ainvoke({"query": query})
         # 格式化搜索结果
         if isinstance(results, dict):
             # TavilySearch 返回格式

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from models import UserModel
@@ -18,7 +19,7 @@ class UserRepository:
 
     def get_by_username(self, username: str) -> UserModel | None:
         """按用户名查询用户。"""
-        return self.db.get(UserModel, username)
+        return self.db.scalar(select(UserModel).where(UserModel.username == username))
 
     def create_user(
         self,
@@ -57,7 +58,7 @@ class UserRepository:
         role: str | None = None,
     ) -> UserModel:
         """更新用户公开资料。"""
-        user = self.db.get(UserModel, username)
+        user = self.get_by_username(username)
         if email is not None:
             user.email = email
         if full_name is not None:
@@ -79,7 +80,7 @@ class UserRepository:
         hashed_password: str | None = None,
     ) -> UserModel:
         """管理员更新用户（包括禁用、角色、密码等）。"""
-        user = self.db.get(UserModel, username)
+        user = self.get_by_username(username)
         if email is not None:
             user.email = email
         if full_name is not None:
@@ -96,7 +97,7 @@ class UserRepository:
 
     def delete_user(self, username: str) -> None:
         """删除用户。"""
-        user = self.db.get(UserModel, username)
+        user = self.get_by_username(username)
         if user is not None:
             self.db.delete(user)
             self.db.commit()

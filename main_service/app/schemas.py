@@ -113,6 +113,7 @@ class RefreshRequest(BaseModel):
 
 
 class User(BaseModel):
+    id: str
     username: str
     email: Optional[str] = None
     full_name: Optional[str] = None

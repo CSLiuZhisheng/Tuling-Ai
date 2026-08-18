@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, List
 import asyncio
 import json
 
@@ -20,6 +20,76 @@ from utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 router = APIRouter()
+
+DISPLAY_NODES = {"format_output", "chat_agent", "knowledge_agent", "fallback_search"}
+TRACK_NODES = {
+    "understand", "ask_clarification", "research", "outline", "draft",
+    "review", "revise", "format_output", "chat_agent", "knowledge_agent",
+    "fallback_search",
+}
+NODE_LABELS = {
+    "understand": "正在理解需求...",
+    "ask_clarification": "正在准备提问...",
+    "research": "正在搜索资料...",
+    "outline": "正在生成大纲...",
+    "draft": "正在撰写文章...",
+    "review": "正在审核内容...",
+    "revise": "正在修订内容...",
+    "format_output": "正在格式化输出...",
+    "chat_agent": "正在思考...",
+    "knowledge_agent": "正在检索知识库...",
+    "fallback_search": "正在搜索...",
+}
+
+
+def sse_event(event_type: str, *, content=None, finished: bool | None = None, **fields) -> str:
+    """构造统一的精简 SSE 事件。中间事件不重复携带 finished=false。"""
+    payload = {"type": event_type}
+    if content is not None:
+        payload["content"] = content
+    if finished is not None:
+        payload["finished"] = finished
+    payload.update(fields)
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def normalize_sources(sources: Any) -> list[str]:
+    """递归解包 RAG 来源，统一转换为前端可展示的文本列表。"""
+    normalized: list[str] = []
+
+    def append_source(source: Any) -> None:
+        if source is None:
+            return
+
+        if isinstance(source, list):
+            for item in source:
+                append_source(item)
+            return
+
+        if isinstance(source, dict):
+            if "text" in source:
+                append_source(source.get("text"))
+                return
+
+            append_source(source.get("sources"))
+            return
+
+        if isinstance(source, str):
+            stripped_source = source.strip()
+            if stripped_source.startswith(("[", "{")):
+                try:
+                    append_source(json.loads(stripped_source))
+                    return
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if source:
+                normalized.append(source)
+            return
+
+        normalized.append(str(source))
+
+    append_source(sources)
+    return normalized
 
 
 # ===== 会话管理 API =====
@@ -95,7 +165,7 @@ async def delete_conversation(
         raise HTTPException(status_code=404, detail="会话不存在")
     # 同时删除 LangGraph Thread 状态
     try:
-        await svc.clear_history(thread_id=current_user.username, conversation_id=conversation_id)
+        await svc.clear_history(thread_id=current_user.id, conversation_id=conversation_id)
     except Exception as e:
         logger.warning(f"删除 LangGraph Thread 失败: {e}")
     return CommonResponse(status="success", message="会话已删除")
@@ -123,7 +193,7 @@ async def chat_query(
     - model
 
     用户身份仍由 FastAPI 的 JWT 鉴权负责，
-    然后把用户名作为 thread_id 传给 LangGraph，
+    然后把稳定的 user_id 作为业务身份传给 LangGraph，
     用于隔离不同用户的记忆与状态。
     """
     # 如果没有提供 conversation_id，自动创建新会话
@@ -141,7 +211,7 @@ async def chat_query(
 
     try:
         result = await svc.chat(
-            thread_id=current_user.username,
+            thread_id=current_user.id,
             conversation_id=conversation_id,
             query=req.query,
             knowledge_bool=req.knowledge_bool,
@@ -201,34 +271,19 @@ async def chat_query_stream(
 
     async def event_generator():
         try:
+            # 先立即刷新一个轻量事件，避免客户端在 LangGraph 建立 run
+            # 和执行前置节点期间误以为连接已失效。
+            yield sse_event(
+                "status",
+                content="请求已接收，正在连接智能体...",
+                is_display=False,
+            )
             final_sources = []
-            prev_content = ""  # 追踪之前的内容，用于计算增量
-            current_node = ""  # 当前执行的节点名
-            # 只有这些节点的内容会显示在对话中
-            display_nodes = {"format_output", "chat_agent", "knowledge_agent", "fallback_search"}
-            # 需要追踪的节点（用于显示加载状态）
-            track_nodes = {
-                "understand", "ask_clarification", "research", "outline", "draft",
-                "review", "revise", "format_output",
-                "chat_agent", "knowledge_agent", "fallback_search",
-            }
-            # 节点中文名称映射
-            node_labels = {
-                "understand": "正在理解需求...",
-                "ask_clarification": "正在准备提问...",
-                "research": "正在搜索资料...",
-                "outline": "正在生成大纲...",
-                "draft": "正在撰写文章...",
-                "review": "正在审核内容...",
-                "revise": "正在修订内容...",
-                "format_output": "正在格式化输出...",
-                "chat_agent": "正在思考...",
-                "knowledge_agent": "正在检索知识库...",
-                "fallback_search": "正在搜索...",
-            }
-            print("准备进入流式输出")
+            prev_content = ""
+            current_node = ""
+            streamed_display_nodes: set[str] = set()
             async for event in svc.chat_stream(
-                thread_id=current_user.username,
+                thread_id=current_user.id,
                 conversation_id=conversation_id,
                 query=req.query,
                 knowledge_bool=req.knowledge_bool,
@@ -236,7 +291,7 @@ async def chat_query_stream(
                 # 检查客户端是否断开连接
                 if await request.is_disconnected():
                     logger.info(f"[CLIENT DISCONNECTED] 用户 {current_user.username} 断开连接，取消正在运行的任务")
-                    await svc.cancel_runs(thread_id=current_user.username, conversation_id=conversation_id)
+                    await svc.cancel_runs(thread_id=current_user.id, conversation_id=conversation_id)
                     break
                 
                 # v2 格式：{"type": "...", "ns": [...], "data": ...}
@@ -252,15 +307,19 @@ async def chat_query_stream(
                             
                             # 检查是否有 answer 内容需要发送
                             answer = node_output.get("answer", "")
-                            if answer and node_name in display_nodes:
-                                # 发送 content 事件
-                                yield f"data: {json.dumps({'type': 'content', 'finished': False, 'content': answer, 'is_display': True}, ensure_ascii=False)}\n\n"
+                            if (
+                                answer
+                                and node_name in DISPLAY_NODES
+                                and node_name not in streamed_display_nodes
+                            ):
+                                # updates 仅作为没有 token 流事件时的兜底，避免重复发送完整答案
+                                yield sse_event("content", content=answer, is_display=True)
                     
                     if "__interrupt__" in event_data:
                         interrupt_data = event_data["__interrupt__"]
                         # 发送会话 ID
-                        yield f"data: {json.dumps({'type': 'conversation_id', 'finished': False, 'content': conversation_id}, ensure_ascii=False)}\n\n"
-                        yield f"data: {json.dumps({'type': 'interrupt', 'finished': False, 'content': interrupt_data}, ensure_ascii=False)}\n\n"
+                        yield sse_event("conversation_id", content=conversation_id)
+                        yield sse_event("interrupt", content=interrupt_data)
                         return
                 
                 # 通过 messages/metadata 事件判断进入哪个节点
@@ -273,10 +332,14 @@ async def chat_query_stream(
                                 current_node = node_name
                                 prev_content = ""  # 重置内容追踪
                                 # 发送节点开始事件
-                                if node_name in track_nodes:
-                                    label = node_labels.get(node_name, f"正在执行 {node_name}...")
-                                    is_display = node_name in display_nodes
-                                    yield f"data: {json.dumps({'type': 'node_start', 'finished': False, 'node': node_name, 'label': label, 'is_display': is_display}, ensure_ascii=False)}\n\n"
+                                if node_name in TRACK_NODES:
+                                    label = NODE_LABELS.get(node_name, f"正在执行 {node_name}...")
+                                    yield sse_event(
+                                        "node_start",
+                                        node=node_name,
+                                        label=label,
+                                        is_display=node_name in DISPLAY_NODES,
+                                    )
                     continue
                 
                 # 处理 messages/partial 事件
@@ -298,10 +361,10 @@ async def chat_query_stream(
                                             delta = content
                                         
                                         if delta:
-                                            yield f"data: {json.dumps({'type': 'article', 'finished': False, 'content': delta, 'node': current_node}, ensure_ascii=False)}\n\n"
+                                            yield sse_event("article", content=delta)
                                         prev_content = content
                     # 显示节点的内容使用 content 事件类型发送
-                    elif current_node in display_nodes:
+                    elif current_node in DISPLAY_NODES:
                         if isinstance(event_data, list):
                             for msg_chunk in event_data:
                                 if isinstance(msg_chunk, dict):
@@ -313,64 +376,25 @@ async def chat_query_stream(
                                             delta = content
                                         
                                         if delta:
-                                            yield f"data: {json.dumps({'type': 'content', 'finished': False, 'content': delta, 'is_display': True}, ensure_ascii=False)}\n\n"
+                                            yield sse_event("content", content=delta, is_display=True)
+                                            streamed_display_nodes.add(current_node)
                                         prev_content = content
 
             # 发送会话 ID
-            yield f"data: {json.dumps({'type': 'conversation_id', 'finished': False, 'content': conversation_id}, ensure_ascii=False)}\n\n"
+            yield sse_event("conversation_id", content=conversation_id)
 
             # 发送最终 sources（如果有）
             if final_sources:
-                # 格式化 sources
-                formatted_sources = []
-                for source in final_sources:
-                    if isinstance(source, str):
-                        # 尝试解析嵌套的 JSON 字符串
-                        try:
-                            # 处理可能的嵌套结构
-                            if source.startswith("[") or source.startswith("{"):
-                                parsed = json.loads(source)
-                                if isinstance(parsed, list):
-                                    for item in parsed:
-                                        if isinstance(item, dict):
-                                            text = item.get("text", "")
-                                            if text:
-                                                # 尝试解析内部的 JSON
-                                                try:
-                                                    inner = json.loads(text)
-                                                    if isinstance(inner, dict):
-                                                        inner_answer = inner.get("answer", "")
-                                                        inner_sources = inner.get("sources", [])
-                                                        for src in inner_sources:
-                                                            formatted_sources.append(str(src))
-                                                except (json.JSONDecodeError, TypeError):
-                                                    formatted_sources.append(text)
-                                        else:
-                                            formatted_sources.append(str(item))
-                                elif isinstance(parsed, dict):
-                                    text = parsed.get("text", "")
-                                    if text:
-                                        formatted_sources.append(text)
-                            else:
-                                formatted_sources.append(source)
-                        except (json.JSONDecodeError, TypeError):
-                            formatted_sources.append(source)
-                    elif isinstance(source, dict):
-                        text = source.get("text", "")
-                        if text:
-                            formatted_sources.append(text)
-                    else:
-                        formatted_sources.append(str(source))
-                
-                yield f"data: {json.dumps({'type': 'sources', 'finished': False, 'content': formatted_sources if formatted_sources else final_sources}, ensure_ascii=False)}\n\n"
+                formatted_sources = normalize_sources(final_sources)
+                yield sse_event("sources", content=formatted_sources or final_sources)
 
             # 发送完成信号
-            yield f"data: {json.dumps({'type': 'complete', 'finished': True, 'content': ''}, ensure_ascii=False)}\n\n"
+            yield sse_event("complete", finished=True)
 
         except asyncio.CancelledError:
             logger.info(f"[STREAM CANCELLED] 用户 {current_user.username} 的流式请求被取消，取消 LangGraph 任务")
             try:
-                await asyncio.shield(svc.cancel_runs(thread_id=current_user.username, conversation_id=conversation_id))
+                await asyncio.shield(svc.cancel_runs(thread_id=current_user.id, conversation_id=conversation_id))
             except asyncio.CancelledError:
                 logger.info(f"[SHIELD CANCELLED] shield 被取消，但 cancel_runs 应该继续执行")
         except Exception as e:
@@ -380,7 +404,7 @@ async def chat_query_stream(
                 "content": f"流式传输错误: {str(e)}",
                 "finished": True,
             }
-            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+            yield sse_event("error", content=error_data["content"], finished=True)
 
     return StreamingResponse(
         content=event_generator(),
@@ -402,7 +426,7 @@ async def get_user_history(
     """
     try:
         chat_history = await svc.get_history(
-            thread_id=current_user.username,
+            thread_id=current_user.id,
             conversation_id=conversation_id,
         )
     except Exception as e:
@@ -438,7 +462,7 @@ async def chat_clear(
     """
     try:
         await svc.clear_history(
-            thread_id=current_user.username,
+            thread_id=current_user.id,
             conversation_id=req.conversation_id,
         )
         return CommonResponse(status="success", message="会话已清空")
@@ -461,7 +485,7 @@ async def chat_clear(
     - 不删除 PostgreSQL 长期记忆表中的历史沉淀
     """
     try:
-        await svc.clear_history(thread_id=current_user.username)
+        await svc.clear_history(thread_id=current_user.id)
         return CommonResponse(status="success", message="会话已清空")
     except Exception as e:
         logger.error(str(e))
@@ -480,33 +504,18 @@ async def chat_resume_stream(
     """
     async def event_generator():
         try:
+            yield sse_event(
+                "status",
+                content="正在继续处理...",
+                is_display=False,
+            )
             final_sources = []
             prev_content = ""
             current_node = ""
             # 只有这些节点的内容会显示在对话中
-            display_nodes = {"format_output", "chat_agent", "knowledge_agent", "fallback_search"}
-            # 需要追踪的节点
-            track_nodes = {
-                "understand", "research", "outline", "draft",
-                "review", "revise", "format_output",
-                "chat_agent", "knowledge_agent", "fallback_search",
-            }
-            # 节点中文名称映射
-            node_labels = {
-                "understand": "正在理解需求...",
-                "research": "正在搜索资料...",
-                "outline": "正在生成大纲...",
-                "draft": "正在撰写文章...",
-                "review": "正在审核内容...",
-                "revise": "正在修订内容...",
-                "format_output": "正在格式化输出...",
-                "chat_agent": "正在思考...",
-                "knowledge_agent": "正在检索知识库...",
-                "fallback_search": "正在搜索...",
-            }
 
             async for event in svc.resume_stream(
-                thread_id=current_user.username,
+                thread_id=current_user.id,
                 conversation_id=req.conversation_id,
                 action=req.action,
                 content=req.content,
@@ -515,7 +524,7 @@ async def chat_resume_stream(
                 # 检查客户端是否断开连接
                 if await request.is_disconnected():
                     logger.info(f"[CLIENT DISCONNECTED] 用户 {current_user.username} 断开连接，取消正在运行的任务")
-                    await svc.cancel_runs(thread_id=current_user.username, conversation_id=req.conversation_id)
+                    await svc.cancel_runs(thread_id=current_user.id, conversation_id=req.conversation_id)
                     break
                 
                 event_type = event.get("type", "")
@@ -531,7 +540,7 @@ async def chat_resume_stream(
 
                     if "__interrupt__" in event_data:
                         interrupt_data = event_data["__interrupt__"]
-                        yield f"data: {json.dumps({'type': 'interrupt', 'finished': False, 'content': interrupt_data}, ensure_ascii=False)}\n\n"
+                        yield sse_event("interrupt", content=interrupt_data)
                         return
 
                 # 通过 messages/metadata 事件判断进入哪个节点
@@ -543,10 +552,14 @@ async def chat_resume_stream(
                             if node_name and node_name != current_node:
                                 current_node = node_name
                                 prev_content = ""
-                                if node_name in track_nodes:
-                                    label = node_labels.get(node_name, f"正在执行 {node_name}...")
-                                    is_display = node_name in display_nodes
-                                    yield f"data: {json.dumps({'type': 'node_start', 'finished': False, 'node': node_name, 'label': label, 'is_display': is_display}, ensure_ascii=False)}\n\n"
+                                if node_name in TRACK_NODES:
+                                    label = NODE_LABELS.get(node_name, f"正在执行 {node_name}...")
+                                    yield sse_event(
+                                        "node_start",
+                                        node=node_name,
+                                        label=label,
+                                        is_display=node_name in DISPLAY_NODES,
+                                    )
                     continue
 
                 # 处理 messages/partial 事件
@@ -568,10 +581,10 @@ async def chat_resume_stream(
                                             delta = content
 
                                         if delta:
-                                            yield f"data: {json.dumps({'type': 'article', 'finished': False, 'content': delta, 'node': current_node}, ensure_ascii=False)}\n\n"
+                                            yield sse_event("article", content=delta)
                                         prev_content = content
                     # 显示节点的内容使用 content 事件类型发送
-                    elif current_node in display_nodes:
+                    elif current_node in DISPLAY_NODES:
                         if isinstance(event_data, list):
                             for msg_chunk in event_data:
                                 if isinstance(msg_chunk, dict):
@@ -583,18 +596,19 @@ async def chat_resume_stream(
                                             delta = content
 
                                         if delta:
-                                            yield f"data: {json.dumps({'type': 'content', 'finished': False, 'content': delta, 'is_display': True}, ensure_ascii=False)}\n\n"
+                                            yield sse_event("content", content=delta, is_display=True)
                                         prev_content = content
 
             if final_sources:
-                yield f"data: {json.dumps({'type': 'sources', 'finished': False, 'content': final_sources}, ensure_ascii=False)}\n\n"
+                formatted_sources = normalize_sources(final_sources)
+                yield sse_event("sources", content=formatted_sources or final_sources)
 
-            yield f"data: {json.dumps({'type': 'complete', 'finished': True, 'content': ''}, ensure_ascii=False)}\n\n"
+            yield sse_event("complete", finished=True)
 
         except asyncio.CancelledError:
             logger.info(f"[STREAM CANCELLED] 用户 {current_user.username} 的流式请求被取消，取消 LangGraph 任务")
             try:
-                await asyncio.shield(svc.cancel_runs(thread_id=current_user.username, conversation_id=req.conversation_id))
+                await asyncio.shield(svc.cancel_runs(thread_id=current_user.id, conversation_id=req.conversation_id))
             except asyncio.CancelledError:
                 logger.info(f"[SHIELD CANCELLED] shield 被取消，但 cancel_runs 应该继续执行")
         except Exception as e:
@@ -604,7 +618,7 @@ async def chat_resume_stream(
                 "content": f"流式传输错误: {str(e)}",
                 "finished": True,
             }
-            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+            yield sse_event("error", content=error_data["content"], finished=True)
 
     return StreamingResponse(
         content=event_generator(),
