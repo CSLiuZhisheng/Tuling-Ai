@@ -117,6 +117,7 @@ pids/
 
 # Database
 *.sqlite3
+.langgraph_api/
 
 # Temporary files
 *.tmp
