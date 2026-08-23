@@ -254,8 +254,9 @@ async def research(state: WritingState) -> WritingState:
     requirements = state.get("requirements", "")
     logger.info(f"[research] 开始信息收集 | query={query[:50]}...")
 
-    # 提取关键词进行搜索（限制长度避免过长）
-    search_query = query
+    # 优先使用需求分析结果，确保澄清后的主题和写作方向进入检索。
+    # 原始请求作为补充上下文保留，避免需求分析结果缺少关键限定词。
+    search_query = f"{requirements}\n原始写作请求：{query}" if requirements else query
     try:
         search_result = await web_search.ainvoke(search_query)
         logger.info(f"[research] 搜索完成 | 结果长度={len(str(search_result))}")
