@@ -1,3 +1,10 @@
+"""LangGraph CLI 图的构建入口。
+
+主图把通用对话编排与各个业务节点连接起来。FastAPI 自定义部署会在
+``app/services/graph_runtime.py`` 重新构建一份拓扑相同、但额外带 PostgreSQL
+长期记忆边界节点的图；两者共享节点实现，避免业务逻辑分叉。
+"""
+
 import asyncio
 import sys
 
@@ -18,7 +25,10 @@ from my_agent.utils.state import GraphState
 from my_agent.utils.tools import memory_tools
 
 if sys.platform.startswith("win"):
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # Psycopg 异步连接不支持 Windows 默认的 ProactorEventLoop。
+    # 直接安装 SelectorEventLoop，避免调用新版 Python 已标记为弃用的
+    # asyncio.set_event_loop_policy()。
+    asyncio.set_event_loop(asyncio.SelectorEventLoop())
 
 
 
@@ -41,6 +51,8 @@ builder.add_edge(START, "summarize")
 builder.add_edge("summarize", "intent_router")
 
 # 根据识别出的 intent 路由到对应子智能体。
+# intent_router 只写入 intent，不直接调用下游节点；条件边负责真正选择
+# knowledge、writing 或 chat 分支，因此路由逻辑和业务处理逻辑彼此隔离。
 builder.add_conditional_edges(
     "intent_router",
     lambda state: state["intent"],
@@ -52,6 +64,7 @@ builder.add_conditional_edges(
 )
 
 # 知识库问答如果结果差，就自动切换到搜索兜底。
+# 该分支只会在 knowledge_agent 完成后判断，不会影响普通聊天和写作流程。
 builder.add_conditional_edges(
     "knowledge_agent",
     knowledge_guard,

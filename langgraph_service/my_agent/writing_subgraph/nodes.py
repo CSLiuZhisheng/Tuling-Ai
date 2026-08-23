@@ -194,12 +194,15 @@ async def ask_clarification(state: WritingState) -> WritingState:
     clarification_question = state.get("clarification_question", "请提供更多关于您写作需求的详细信息。")
     logger.info(f"[ask_clarification] 向用户提问 | question={clarification_question[:100]}...")
 
-    # 构造发送给用户的消息
+    # 构造发送给用户的消息。这个消息既要显示给用户，也要写入消息历史，
+    # 这样恢复执行后模型仍能看到自己曾经提出过什么问题。
     content = f"您的需求描述不够清晰，我需要了解更多信息：\n\n{clarification_question}\n\n请补充说明您的写作需求。"
 
     # 先把问题写入消息历史
     ask_message = AIMessage(content=content)
 
+    # interrupt 会把图停在当前 checkpoint。HTTP 层收到暂停事件后返回前端，
+    # 前端稍后通过 Command(resume=...) 把答案送回这里，函数才会继续执行。
     # 使用 interrupt 暂停执行，将问题发送给用户
     # interrupt 的返回值是前端通过 Command(resume=user_answer) 传入的数据
     user_answer = interrupt({
@@ -422,20 +425,25 @@ async def human_review(state: WritingState) -> WritingState:
     draft_text = state.get("draft", "")
     logger.info(f"[human_review] 进入人机交互 | 草稿长度={len(draft_text)}")
     logger.info(f"[human_review] 草稿前100字: {draft_text}...")
-    content = f"请审阅草稿内容：\n\n{draft_text}\n\n您可以选择：确认通过、修改内容、或重新生成"
+    content = f"{draft_text}"
      # 先把"发给用户的内容"写入消息历史
     review_message = AIMessage(content=content)
 
 
-    # 使用 interrupt 暂停执行，将草稿发送给用户审阅
-    # interrupt 的返回值是前端通过 Command(resume=user_feedback) 传入的数据
+    # 使用 interrupt 暂停执行，将草稿发送给用户审阅。
+    #
+    # 这里故意只把草稿放在 ``draft`` 字段中，不再额外放一个 ``message``
+    # 字段。前端的审阅面板已经负责显示“请审阅草稿”和操作按钮；如果同时
+    # 发送 ``message``，一些兼容旧协议的客户端会把它误当成 AI 正文，导致
+    # “请审阅草稿内容：您可以选择……”出现在聊天气泡里。
+    # interrupt 的返回值是前端通过 Command(resume=user_feedback) 传入的数据。
     user_feedback = interrupt({
         "type": "human_review",
         "draft": content,
-        "message": "请审阅草稿内容，您可以选择：确认通过、修改内容、或重新生成",
     })
 
-    # 根据用户反馈处理
+    # 根据用户反馈处理。这里不直接修改图的控制流，真正跳到 draft 或
+    # format_output 由 human_review_router 根据 human_action 决定。
     action = user_feedback.get("action", "approve")
     logger.info(f"[human_review] 用户操作: {action}")
     

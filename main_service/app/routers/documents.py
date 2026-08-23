@@ -35,6 +35,7 @@ async def upload_docs(
     current_user: User = Depends(get_current_active_user),
     svc: RAGApiService = Depends(get_rag_api_service),
 ):
+    """接收前端 multipart 文件，再转发给 RAG 服务进行摄取。"""
     try:
         payload = [(file.filename or "unnamed", await file.read()) for file in files]
         result = await svc.upload_files(payload, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
@@ -124,6 +125,7 @@ async def reset_system(
     current_user: User = Depends(get_current_active_user),
     svc: RAGApiService = Depends(get_rag_api_service),
 ):
+    """执行系统级 RAG 重置；鉴权在当前版本只要求有效登录。"""
     try:
         result = await svc.reset_system()
         return CommonResponse(

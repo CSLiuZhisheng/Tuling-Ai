@@ -1,3 +1,10 @@
+"""主 LangGraph 的状态定义。
+
+本模块只描述图中节点之间传递的数据，不负责真正执行模型调用。理解这份
+状态结构，是理解主图和写作子图数据流的入口：节点通常只返回自己新增或
+修改的字段，LangGraph 再把这些增量合并回当前状态。
+"""
+
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph.message import add_messages

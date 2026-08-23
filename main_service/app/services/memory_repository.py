@@ -1,3 +1,10 @@
+"""main_service 自己的简单长期记忆仓储。
+
+它是独立的数据库模型，当前聊天主流程主要使用 langgraph_service 的
+AsyncPostgresStore；保留本仓储是为了管理 main_service 侧的显式记忆条目，
+两者不要混淆成同一种存储。
+"""
+
 from __future__ import annotations
 
 from sqlalchemy.orm import Session

@@ -1,3 +1,9 @@
+"""rag_api_service 的 HTTP 代理。
+
+main_service 只负责鉴权、参数校验和错误转换；文档解析、分块、索引和 RAG
+查询都归 rag_api_service 所有。每个方法把一个业务动作转换成对应 REST 请求。
+"""
+
 from __future__ import annotations
 
 from typing import Any, Optional
@@ -8,12 +14,16 @@ from config.settings import Settings
 
 
 class RAGApiService:
+    """面向文档管理路由的 RAG REST 客户端。"""
+
     def __init__(self, base_url: str | None = None):
         self.base_url = (base_url or Settings.RAG_API_URL).rstrip("/")
 
     async def upload_files(self, files: list[tuple[str, bytes]],
                            chunk_size: Optional[int] = None,
                            chunk_overlap: Optional[int] = None) -> dict[str, Any]:
+        # 上传和解析 PDF 可能持续较久，使用独立的长超时；其他元数据接口
+        # 使用更短超时，避免下游故障时请求长期占用 worker。
         async with httpx.AsyncClient(timeout=300.0) as client:
             multipart = [
                 ("files", (name, content, "application/octet-stream"))

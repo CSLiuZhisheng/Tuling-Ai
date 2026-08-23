@@ -22,12 +22,14 @@ main_service/
 │   ├── schemas.py
 │   ├── routers/
 │   │   ├── chat.py          # 聊天接口
+│   │   ├── custom_chat.py   # 自定义 FastAPI LangGraph 聊天接口
 │   │   ├── documents.py     # 文档管理接口
 │   │   └── users.py         # 用户与鉴权接口
 │   └── services/
 │       ├── __init__.py
 │       ├── auth_service.py
 │       ├── langgraph_service.py  # 调用 langgraph_service
+│       ├── custom_langgraph_service.py  # 普通 HTTP 调用自定义业务 API
 │       ├── rag_api_service.py    # 通过 HTTP 调用 rag_api_service
 │       ├── memory_repository.py
 │       └── user_repository.py
@@ -76,6 +78,17 @@ main_service/
 - `GET /api/docs/list`：文档列表
 - `POST /api/docs/reset`：重置知识库
 
+### 3.5 方案二自定义聊天接口
+
+使用新增入口启动时，下面的接口通过普通 HTTP 调用 `langgraph_service` 的
+自定义 FastAPI API，不依赖 `langgraph-sdk`：
+
+- `POST /api/custom-chat/chat`
+- `POST /api/custom-chat/chat/stream`
+- `GET /api/custom-chat/history?conversation_id=...`
+- `POST /api/custom-chat/clear`
+- `POST /api/custom-chat/chat/resume/stream`
+
 文档接口内部通过 HTTP 直接调用 `rag_api_service`，不再经过 MCP 协议。
 
 ---
@@ -109,6 +122,10 @@ main_service/
 uv run --project main_service python main_service/run.py
 ```
 
+方案二已经在 `main_service/app/main.py` 中统一注册，使用原入口即可启动。主服务
+会同时提供原有 `/api/chat/*` 和新增的 `/api/custom-chat/*`，前端或网关可以将
+聊天请求切换到新前缀进行灰度验证。
+
 默认监听：
 
 - `http://127.0.0.1:8000`
@@ -127,6 +144,8 @@ uv run --project main_service python main_service/run.py
 - `ACCESS_TOKEN_EXPIRE_MINUTES`：Token 过期时间
 - `DASHSCOPE_MODEL`：默认聊天模型名
 - `LANGGRAPH_API_URL`：LangGraph 服务地址
+- 方案二中的 `LANGGRAPH_API_URL`：自定义 FastAPI LangGraph 服务地址，默认
+  `http://127.0.0.1:2024`
 - `LANGGRAPH_ASSISTANT_ID`：LangGraph Assistant ID
 - `RAG_API_URL`：rag_api_service 地址（默认 `http://127.0.0.1:8011/api/docs`）
 

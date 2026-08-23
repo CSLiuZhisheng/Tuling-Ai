@@ -1,3 +1,9 @@
+"""main_service 的 SQLAlchemy 基础设施。
+
+路由通过 ``get_db`` 获取请求级 Session，仓储类只使用这个 Session 完成
+查询和提交。数据库连接池由 Engine 管理，Session 不应跨请求复用。
+"""
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
@@ -27,6 +33,7 @@ def get_db():
     - 进入请求时创建 Session
     - 请求结束后自动关闭 Session
     """
+    # 每个请求单独创建 Session；finally 保证异常响应也能释放连接回连接池。
     db = SessionLocal()
     try:
         yield db

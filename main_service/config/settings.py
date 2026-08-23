@@ -1,3 +1,10 @@
+"""main_service 的环境配置。
+
+鉴权密钥、数据库连接和下游服务地址统一从项目根目录 ``.env`` 读取。
+其中 ``LANGGRAPH_API_URL`` 指向自定义 LangGraph HTTP 服务时，旧 SDK 客户端
+和自定义 HTTP 客户端都可以复用这个地址。
+"""
+
 import os
 from pathlib import Path
 

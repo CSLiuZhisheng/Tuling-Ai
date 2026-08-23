@@ -1,3 +1,10 @@
+"""main_service 的 ORM 表模型。
+
+这里的数据主要服务于两类状态：用户/会话等业务元数据，以及一个简单的
+长期记忆表。LangGraph 自己的 checkpoint 和 store 仍由 langgraph_service
+管理，不能把本文件的会话表误认为 LangGraph 的短期状态表。
+"""
+
 from datetime import datetime
 import uuid
 
@@ -8,6 +15,7 @@ from db import Base
 
 
 def generate_uuid() -> str:
+    """生成业务表使用的字符串 UUID。"""
     return str(uuid.uuid4())
 
 

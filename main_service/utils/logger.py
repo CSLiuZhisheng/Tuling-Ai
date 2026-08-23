@@ -1,3 +1,5 @@
+"""统一日志配置：同时输出到控制台和 ``file/logs`` 目录。"""
+
 import logging
 import sys
 from pathlib import Path
@@ -15,7 +17,8 @@ def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(level)
 
-    # 如果记录器已经有处理器，直接返回
+    # 模块可能被多次导入或重复初始化；避免重复添加 handler，导致同一条
+    # 日志在控制台和文件中被重复写入多次。
     if logger.handlers:
         return logger
 

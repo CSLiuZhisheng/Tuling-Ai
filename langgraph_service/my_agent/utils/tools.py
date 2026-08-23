@@ -1,3 +1,10 @@
+"""主图使用的外部工具。
+
+这里把外部系统访问集中起来：MCP 负责调用 RAG，Tavily 负责搜索兜底，
+langmem 工具负责长期记忆管理。节点只需要调用这些工具，不需要关心具体的
+HTTP/MCP 协议细节。
+"""
+
 import json
 from typing import Any
 
@@ -18,6 +25,11 @@ from mcp.client.streamable_http import streamable_http_client
 
 
 async def _call_via_langchain(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """通过 LangChain MCP adapter 调用工具。
+
+    adapter 能把远端 MCP 工具包装成 LangChain Tool，适合和其他 LangChain
+    组件统一使用。函数只负责一次调用，不持有跨请求的客户端对象。
+    """
     if MultiServerMCPClient is None:
         raise ImportError("langchain-mcp-adapters is not installed")
 
@@ -37,6 +49,11 @@ async def _call_via_langchain(tool_name: str, arguments: dict[str, Any]) -> Any:
 
 
 async def _call_via_mcp(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """直接使用 MCP streamable-http 协议调用工具。
+
+    这是 adapter 不可用或调用失败时的兼容路径。MCP 返回值可能是结构化内容，
+    也可能是文本 JSON，因此这里统一尽量还原为 Python 对象。
+    """
     async with streamable_http_client(Settings.MCP_SERVICE_URL) as (read, write, *_):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -54,6 +71,7 @@ async def _call_via_mcp(tool_name: str, arguments: dict[str, Any]) -> Any:
 
 
 async def call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> Any:
+    """调用 RAG MCP 工具，并在两种 MCP 客户端实现之间自动降级。"""
     try:
         return await _call_via_langchain(tool_name, arguments)
     except Exception:
@@ -71,6 +89,8 @@ tavily_search = TavilySearch(
 async def web_search(query: str) -> str:
     """搜索互联网上的公开信息，用于知识库不足时补充事实。"""
     try:
+        # Tavily 返回的是搜索结果集合，而 fallback 节点只需要一段可以直接
+        # 交给模型或前端的文本，所以在工具边界完成格式化。
         results = await tavily_search.ainvoke({"query": query})
         # 格式化搜索结果
         if isinstance(results, dict):

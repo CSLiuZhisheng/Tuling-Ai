@@ -18,12 +18,12 @@
 │                    JWT 鉴权 · 用户管理 · 会话管理                              │
 └─────────────────────────────────────────────────────────────────────────────┘
                     │                           │
-                    │ langgraph-sdk              │ HTTP REST
+                    │ 普通 HTTP（自定义业务 API）    │ HTTP REST
                     ▼                           ▼
 ┌─────────────────────────────────┐   ┌─────────────────────────────────┐
 │    langgraph_service            │   │      rag_api_service            │
 │    http://localhost:2024        │   │      http://localhost:8011      │
-│  多智能体编排 · 意图路由           │   │  RAG 核心 · 文档管理            │
+│ FastAPI · 多智能体编排 · 意图路由  │   │  RAG 核心 · 文档管理            │
 └─────────────────────────────────┘   └─────────────────────────────────┘
                     │                           ▲
                     │ MCP over HTTP              │ HTTP REST
@@ -59,7 +59,7 @@
 | 层级 | 技术 |
 |------|------|
 | **前端** | Vue 3, TypeScript, Vite 6, Element Plus 2, Tailwind CSS 4, Pinia 3, Axios, Vue Router, Marked, Highlight.js |
-| **后端网关** | FastAPI, SQLAlchemy, PyJWT, pwdlib[argon2], langgraph-sdk |
+| **后端网关** | FastAPI, SQLAlchemy, PyJWT, pwdlib[argon2], httpx |
 | **智能体编排** | LangGraph, LangMem, LangChain-Tavily, MCP Adapters |
 | **RAG 核心** | LlamaIndex, ChromaDB, BM25, Sentence-Transformers, PyMuPDF |
 | **协议层** | FastMCP (MCP over HTTP) |
@@ -82,10 +82,27 @@
 **主要接口：**
 - `/users/*` - 用户认证（登录/注册/退出）
 - `/api/chat/*` - 聊天接口（流式/非流式）
+- `/api/custom-chat/*` - 调用自定义 FastAPI LangGraph 服务的聊天接口
 - `/api/docs/*` - 文档管理（上传/列表/重置）
 
 ### langgraph_service (`:2024`)
-多智能体编排服务，基于 LangGraph 构建。
+多智能体编排服务，基于 LangGraph 图和自定义 FastAPI 部署。
+
+生产环境推荐使用新增的纯 FastAPI 入口，不依赖 LangGraph Server、LangGraph CLI
+或 `langgraph-sdk` 的服务协议。原有 LangGraph CLI 入口仍然保留，主要用于兼容、
+调试和本地查看 LangGraph UI。
+
+**自定义 FastAPI 接口：**
+- `POST /api/chat` - 非流式聊天
+- `POST /api/chat/stream` - 自定义 SSE 流式聊天
+- `POST /api/chat/resume` - 恢复 interrupt 流程
+- `GET /api/conversations/{conversation_id}/history` - 查询短期会话历史
+- `DELETE /api/conversations/{conversation_id}` - 清理会话 checkpoint
+- `POST /api/chat/cancel` - 取消当前 worker 中的任务
+
+自定义 FastAPI 运行时通过 `builder.compile(checkpointer=..., store=...)` 注入
+PostgreSQL：`AsyncPostgresSaver` 保存短期 checkpoint，`AsyncPostgresStore` 保存
+跨会话长期记忆。
 
 **图结构：**
 ```
@@ -158,6 +175,9 @@ DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
 
 # PostgreSQL 连接串
 POSTGRES_URL=postgresql+psycopg://postgres:your_password@127.0.0.1:5432/langgraph_agents
+
+# 自定义 FastAPI LangGraph 运行时使用的 PostgreSQL URI
+POSTGRES_URI_CUSTOM=postgresql://postgres:your_password@127.0.0.1:5432/langgraph_agents?sslmode=disable
 ```
 
 **可选配置：**
@@ -196,8 +216,8 @@ uv run --project rag_api_service python rag_api_service/run.py
 # 2. MCP 代理服务
 uv run --project mcp_service python mcp_service/run.py
 
-# 3. LangGraph 服务
-uv run --project langgraph_service langgraph dev --config langgraph_service/langgraph.json
+# 3. LangGraph 自定义 FastAPI 服务（生产推荐）
+uv run --project langgraph_service python langgraph_service/run.py
 
 # 4. 主入口服务
 uv run --project main_service python main_service/run.py
@@ -210,7 +230,7 @@ cd chat-ai-ui-main/chat-ai-ui-main && npm run dev
 
 - 前端界面：http://localhost:5173
 - 主服务 API：http://localhost:8000/docs
-- LangGraph UI：http://localhost:2024
+- LangGraph 自定义 FastAPI 文档：http://localhost:2024/docs
 
 **默认管理员：**
 - 用户名：`root`
@@ -235,6 +255,13 @@ Tuling-Ai/
 │   ├── config/
 │   └── models.py             # 数据库模型
 ├── langgraph_service/        # LangGraph 编排服务
+│   ├── app/
+│   │   ├── main.py           # FastAPI 应用入口和生命周期管理
+│   │   ├── api/chat.py       # 聊天、流式、恢复、历史、清理、取消接口
+│   │   ├── schemas/chat.py   # Pydantic 请求模型
+│   │   └── services/
+│   │       └── graph_runtime.py # PostgreSQL + LangGraph 运行时
+│   ├── run.py                # Uvicorn 启动入口
 │   ├── my_agent/
 │   │   ├── agent.py          # 图构建入口
 │   │   ├── utils/            # 节点、状态、工具
@@ -258,11 +285,15 @@ Tuling-Ai/
 └── AGENTS.md                 # 架构文档
 ```
 
+`langgraph_service` 中的 `my_agent/`、`config/` 和原有图入口保持不变。新增的
+`app/` 目录只负责 FastAPI 业务 API、请求模型和 PostgreSQL 图运行时，不修改
+原有 Agent 图代码。
+
 ## 数据流
 
 ### 知识库问答流程
 ```
-用户提问 → main_service → langgraph_service
+用户提问 → main_service → /api/custom-chat/* → langgraph_service FastAPI
     → intent_router (识别为 knowledge)
     → knowledge_agent → MCP → mcp_service → rag_api_service
     → ChromaDB 向量检索 + BM25 检索
@@ -273,7 +304,7 @@ Tuling-Ai/
 
 ### 写作流程
 ```
-用户请求写作 → main_service → langgraph_service
+用户请求写作 → main_service → /api/custom-chat/* → langgraph_service FastAPI
     → intent_router (识别为 writing)
     → writing_workflow (子图)
         → understand (理解需求)
@@ -304,6 +335,7 @@ Tuling-Ai/
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `POSTGRES_URL` | PostgreSQL 连接串 | - |
+| `POSTGRES_URI_CUSTOM` | 自定义 FastAPI 运行时使用的 PostgreSQL URI | `postgresql://postgres:123456@127.0.0.1:5432/langgraph_agents?sslmode=disable` |
 | `MCP_SERVICE_URL` | MCP 服务地址 | http://127.0.0.1:8010/mcp |
 | `DASHSCOPE_MODEL` | 默认模型 | qwen-turbo |
 
@@ -316,6 +348,35 @@ Tuling-Ai/
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Token 过期时间 | 1440 |
 | `LANGGRAPH_API_URL` | LangGraph 服务地址 | http://127.0.0.1:2024 |
 | `RAG_API_URL` | RAG 服务地址 | http://127.0.0.1:8011/api/docs |
+
+## 部署模式
+
+### 生产部署：自定义 FastAPI
+
+生产环境使用普通 Uvicorn/FastAPI 进程：
+
+```powershell
+uv run --project langgraph_service python langgraph_service/run.py
+```
+
+Windows 下启动入口会直接创建 Psycopg 兼容的 `SelectorEventLoop`，不调用已经
+被新版 Python 标记为弃用的 `set_event_loop_policy`。
+
+该模式由项目自己定义 `/api/chat`、`/api/chat/stream`、历史、恢复和取消等
+业务接口，`main_service` 通过普通 `httpx` 调用，不依赖 LangGraph Server 的
+标准 `/threads`、`/runs`、`/assistants` 协议，也不需要 `langgraph-sdk`。
+
+### 本地调试：LangGraph CLI
+
+原有 CLI 入口仍然保留，可用于本地调试或查看 LangGraph UI：
+
+```powershell
+uv run --project langgraph_service langgraph dev --config langgraph_service/langgraph.json
+```
+
+该入口不作为新的生产部署方式。使用 CLI 时，主服务原有的 `/api/chat/*` 路由
+仍可继续使用；使用自定义 FastAPI 时，推荐调用主服务新增的
+`/api/custom-chat/*` 路由。
 
 ## 常见问题
 

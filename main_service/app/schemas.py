@@ -1,3 +1,10 @@
+"""main_service 的请求和响应模型。
+
+Schema 负责约束 HTTP 边界的数据格式；它们不负责鉴权、数据库写入或调用
+下游服务。尤其要区分 ``query``（main_service 对外字段）和自定义 LangGraph
+接口使用的 ``message``，后者在 service 适配层转换。
+"""
+
 from typing import List, Optional, Any, Dict
 from datetime import datetime
 from pydantic import BaseModel
@@ -43,6 +50,7 @@ class ChatMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    """聊天请求；会话 ID 为空时由路由创建新的业务会话。"""
     query: str
     conversation_id: Optional[str] = None  # 会话 ID，为空时自动创建新会话
     knowledge_bool: Optional[bool] = False
@@ -55,6 +63,7 @@ class ChatResponse(BaseModel):
 
 
 class ResumeRequest(BaseModel):
+    """恢复写作澄清/人工审阅 interrupt 的请求。"""
     conversation_id: str  # 会话 ID
     action: str  # approve / edit / rewrite / clarify
     content: Optional[str] = None  # 用户编辑后的内容（仅 action=edit 时需要）

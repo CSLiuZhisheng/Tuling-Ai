@@ -1,3 +1,9 @@
+"""认证服务：密码哈希、JWT 生成/解析和用户对象转换。
+
+路由层只负责 HTTP 参数和状态码；本模块负责认证规则。JWT 只保存用户名
+和令牌类型，真正的用户存在性、禁用状态和角色仍要回数据库校验。
+"""
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -34,6 +40,7 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     - `exp` 字段存过期时间
     - `type` 字段区分 access/refresh
     """
+    # 复制调用方字典，避免给外部传入的 data 原地追加 exp/type。
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire, "type": "access"})
@@ -99,6 +106,8 @@ def decode_token(token: str, expected_type: str = "access") -> TokenData:
     - 只负责解码，不负责业务上的"用户是否存在"判断
     - 通过 expected_type 参数区分 access_token 和 refresh_token
     """
+    # jwt.decode 同时验证签名和 exp；下面再校验 type，防止 refresh token
+    # 被当作 access token 直接访问受保护接口。
     payload = jwt.decode(token, Settings.JWT_SECRET_KEY, algorithms=[Settings.JWT_ALGORITHM])
     token_type = payload.get("type", "access")
     if token_type != expected_type:

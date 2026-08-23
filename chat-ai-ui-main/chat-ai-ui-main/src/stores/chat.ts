@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia';
-import { ref, computed } from 'vue';
+import { ref } from 'vue';
 import axios from 'axios';
 import { useUserStore } from './user';
 
@@ -59,6 +59,19 @@ async function fetchWithAuth(url: string, options: RequestInit = {}): Promise<Re
   }
 
   return response;
+}
+
+/**
+ * 只提取人机审阅中断里的草稿正文。
+ *
+ * 旧版服务曾把审阅说明放在 `message` 字段，部分客户端还会把这段说明
+ * 拼到 `draft` 里。审阅说明属于操作面板，不属于文章正文，因此在前端
+ * 再做一次边界清洗，避免历史服务返回的数据污染聊天气泡。
+ */
+function getReviewDraft(value: Record<string, any>): string {
+  const draft = String(value.draft || '');
+  const reviewPrompt = /请审阅草稿内容[：:，,]?\s*您可以选择[：:]?\s*确认通过、修改内容、或重新生成/;
+  return draft.replace(reviewPrompt, '').trim();
 }
 
 
@@ -194,7 +207,7 @@ export const useChatStore = defineStore('chat', () => {
 
     try {
       const { data } = await axios.get(
-        `${import.meta.env.VITE_API_URL}/api/chat/history`,
+        `${import.meta.env.VITE_API_URL}/api/custom-chat/history`,
         {
           params: { conversation_id: currentConversationId.value },
           headers: { 'Authorization': `Bearer ${userStore.token}` }
@@ -260,7 +273,7 @@ export const useChatStore = defineStore('chat', () => {
     abortController = new AbortController();
     
     try {
-      const response = await fetchWithAuth(`${import.meta.env.VITE_API_URL}/api/chat/chat/stream`, {
+      const response = await fetchWithAuth(`${import.meta.env.VITE_API_URL}/api/custom-chat/chat/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -289,8 +302,12 @@ export const useChatStore = defineStore('chat', () => {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        // fetch 读取到的是任意大小的二进制分片，一个 SSE JSON 可能被拆成
+        // 多个分片。因此先累计到 buffer，再按换行拆分，不能直接对每个
+        // read() 的 value 做 JSON.parse。
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
+        // 最后一项可能只是半行，留到下一次 read() 再继续拼接。
         buffer = lines.pop() || '';
 
         for (const line of lines) {
@@ -302,6 +319,9 @@ export const useChatStore = defineStore('chat', () => {
             try {
               const data = JSON.parse(jsonStr);
               if (data.finished) {
+                // complete 事件带有 finished=true。结束当前事件处理即可，
+                // reader 会继续读取直到服务端关闭 SSE；这样不会误把完成事件
+                // 当成普通回答文本。
                 break;
               }
               if (data.type === "conversation_id") {
@@ -321,6 +341,8 @@ export const useChatStore = defineStore('chat', () => {
                 
                 // 如果进入 draft 节点，开始文章撰写模式
                 if (data.node === 'draft') {
+                  // 草稿是独立的预览区域。每次重新进入 draft 都代表新一轮
+                  // 生成，所以清空旧草稿，避免 rewrite 后两版文章连接在一起。
                   isArticleWriting.value = true;
                   articleContent.value = '';  // 清空之前的文章内容
                 }
@@ -337,12 +359,16 @@ export const useChatStore = defineStore('chat', () => {
                   currentWritingStep.value = '';
                 }
               } else if (data.type === "article") {
-                // 文章内容事件（draft 节点的内容）
+                // article 只更新草稿预览，不写入普通 AI 消息；最终通过
+                // content 事件输出的文章才会进入聊天记录。
                 if (data.content) {
                   articleContent.value += data.content;
                 }
               } else if (data.type === "interrupt") {
                 // 收到 interrupt 事件，进入人机交互模式
+                // 服务端统一输出 content=[{value: {...}}]。value.type 用于
+                // 区分“需要澄清需求”和“等待审阅草稿”。没有 type 时按审阅
+                // 处理，兼容旧服务只返回 draft 的情况。
                 const interruptData = data.content;
                 const interruptValue = Array.isArray(interruptData) && interruptData[0]?.value
                   ? interruptData[0].value
@@ -360,7 +386,7 @@ export const useChatStore = defineStore('chat', () => {
                   isWaitingClarification.value = true;
                 } else {
                   // 草稿审阅类型
-                  const draft = interruptValue.draft || '';
+                  const draft = getReviewDraft(interruptValue);
                   messages.value[aiMessageIndex].content = draft;
                   messages.value[aiMessageIndex].isReviewing = true;
                   messages.value[aiMessageIndex].draft = draft;
@@ -375,7 +401,8 @@ export const useChatStore = defineStore('chat', () => {
                 reader.releaseLock();
                 return;
               } else if (data.type === "content" || data.type === "text") {
-                // 只显示 is_display 节点的内容
+                // 只有标记 is_display 的内容才是用户答案。内部摘要、路由和
+                // 长期记忆不会被写入消息气泡，即使后端为了调试转发了 update。
                 if (data.content && data.is_display) {
                   if (!receivedFirstContent) {
                     receivedFirstContent = true;
@@ -456,7 +483,7 @@ export const useChatStore = defineStore('chat', () => {
       abortController = new AbortController();
 
       // 使用流式接口恢复执行
-      const response = await fetchWithAuth(`${import.meta.env.VITE_API_URL}/api/chat/chat/resume/stream`, {
+      const response = await fetchWithAuth(`${import.meta.env.VITE_API_URL}/api/custom-chat/chat/resume/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -532,7 +559,7 @@ export const useChatStore = defineStore('chat', () => {
                   isWaitingClarification.value = true;
                 } else {
                   // 草稿审阅类型
-                  const draft = interruptValue.draft || '';
+                  const draft = getReviewDraft(interruptValue);
                   messages.value[aiMessageIndex].content = draft;
                   messages.value[aiMessageIndex].isReviewing = true;
                   messages.value[aiMessageIndex].draft = draft;
@@ -644,7 +671,7 @@ export const useChatStore = defineStore('chat', () => {
       abortController = new AbortController();
 
       // 使用流式接口恢复执行
-      const response = await fetchWithAuth(`${import.meta.env.VITE_API_URL}/api/chat/chat/resume/stream`, {
+      const response = await fetchWithAuth(`${import.meta.env.VITE_API_URL}/api/custom-chat/chat/resume/stream`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -718,7 +745,7 @@ export const useChatStore = defineStore('chat', () => {
                   messages.value[aiMessageIndex].clarificationQuestion = question;
                   isWaitingClarification.value = true;
                 } else {
-                  const draft = interruptValue.draft || '';
+                  const draft = getReviewDraft(interruptValue);
                   messages.value[aiMessageIndex].content = draft;
                   messages.value[aiMessageIndex].isReviewing = true;
                   messages.value[aiMessageIndex].draft = draft;

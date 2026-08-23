@@ -1,3 +1,11 @@
+"""旧 LangGraph SDK 聊天路由。
+
+本路由把 SDK 的 ``messages/metadata``、``messages/partial`` 和 ``updates``
+事件翻译成前端使用的简化 SSE。metadata 决定当前节点，partial 提供 token，
+updates 提供写作节点的完整结果或 interrupt；三类事件的职责不同，不能混为
+一个普通文本流。
+"""
+
 from typing import Any, List
 import asyncio
 import json
@@ -43,7 +51,11 @@ NODE_LABELS = {
 
 
 def sse_event(event_type: str, *, content=None, finished: bool | None = None, **fields) -> str:
-    """构造统一的精简 SSE 事件。中间事件不重复携带 finished=false。"""
+    """构造统一的精简 SSE 事件。
+
+    前端只需解析 ``data`` 中的 JSON；中间事件不重复携带 finished=false，
+    只有 complete/error 等收尾事件才明确表达结束状态。
+    """
     payload = {"type": event_type}
     if content is not None:
         payload["content"] = content
@@ -53,8 +65,30 @@ def sse_event(event_type: str, *, content=None, finished: bool | None = None, **
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
+def normalize_interrupt_payload(value: Any) -> Any:
+    """清理发给前端的人机交互载荷。
+
+    ``human_review`` 的草稿正文位于 ``draft``，审阅说明由前端面板负责展示，
+    因此不能再把同一说明放进 ``message``。这里兼容列表、``{value: ...}``
+    和直接字典三种 LangGraph 返回形态，避免旧 checkpoint 中的 ``message``
+    字段被误当成 AI 消息正文；澄清中断仍保留 ``message`` 作为兼容字段。
+    """
+    if isinstance(value, list):
+        return [normalize_interrupt_payload(item) for item in value]
+    if isinstance(value, dict):
+        if "value" in value:
+            return {**value, "value": normalize_interrupt_payload(value["value"])}
+        if value.get("type") == "human_review":
+            return {key: item for key, item in value.items() if key != "message"}
+    return value
+
+
 def normalize_sources(sources: Any) -> list[str]:
-    """递归解包 RAG 来源，统一转换为前端可展示的文本列表。"""
+    """递归解包 RAG 来源，统一转换为前端可展示的文本列表。
+
+    RAG 返回值在不同版本中可能是列表、``{"text": ...}``、嵌套 JSON 字符串，
+    所以在 API 边界统一清洗，前端不需要理解下游格式差异。
+    """
     normalized: list[str] = []
 
     def append_source(source: Any) -> None:
@@ -196,7 +230,8 @@ async def chat_query(
     然后把稳定的 user_id 作为业务身份传给 LangGraph，
     用于隔离不同用户的记忆与状态。
     """
-    # 如果没有提供 conversation_id，自动创建新会话
+    # 如果没有提供 conversation_id，先在 main_service 会话表创建业务会话。
+    # 这个 ID随后同时传给 LangGraph service，成为短期 checkpoint 隔离键的一部分。
     conversation_id = req.conversation_id
     if not conversation_id:
         repo = ConversationRepository(db)
@@ -270,6 +305,8 @@ async def chat_query_stream(
         repo.touch(conversation_id, current_user.username)
 
     async def event_generator():
+        # 事件生成器在真正消费下游流时才执行，因此可以感知客户端断开并及时
+        # 取消下游 run，避免浏览器已经关闭后模型仍继续生成。
         try:
             # 先立即刷新一个轻量事件，避免客户端在 LangGraph 建立 run
             # 和执行前置节点期间误以为连接已失效。
@@ -294,10 +331,12 @@ async def chat_query_stream(
                     await svc.cancel_runs(thread_id=current_user.id, conversation_id=conversation_id)
                     break
                 
-                # v2 格式：{"type": "...", "ns": [...], "data": ...}
+                # v2 格式：{"type": "...", "ns": [...], "data": ...}。
+                # metadata/partial/updates 是 SDK 事件，不是最终前端协议。
                 event_type = event.get("type", "")
                 event_data = event.get("data", {})
-                # 检测 interrupt 事件（人机交互节点）
+                # updates 承载 interrupt，因为节点暂停时没有普通 answer；
+                # 必须单独发送 interrupt，让前端显示澄清/审阅控件。
                 if event_type == "updates" and isinstance(event_data, dict):
                     for node_name, node_output in event_data.items():
                         if isinstance(node_output, dict):
@@ -316,13 +355,14 @@ async def chat_query_stream(
                                 yield sse_event("content", content=answer, is_display=True)
                     
                     if "__interrupt__" in event_data:
-                        interrupt_data = event_data["__interrupt__"]
+                        interrupt_data = normalize_interrupt_payload(event_data["__interrupt__"])
                         # 发送会话 ID
                         yield sse_event("conversation_id", content=conversation_id)
                         yield sse_event("interrupt", content=interrupt_data)
                         return
                 
-                # 通过 messages/metadata 事件判断进入哪个节点
+                # metadata 只负责确定当前节点和发送进度事件，不把 metadata
+                # 中的内部运行信息直接暴露给前端。
                 if event_type == "messages/metadata" and isinstance(event_data, dict):
                     for run_id, run_info in event_data.items():
                         if isinstance(run_info, dict):
@@ -342,7 +382,8 @@ async def chat_query_stream(
                                     )
                     continue
                 
-                # 处理 messages/partial 事件
+                # partial 才是 token/累计文本流。根据当前节点选择 article
+                # （草稿）或 content（最终对话答案）协议。
                 if event_type == "messages/partial":
                     # current_node 为空时，不发送 content 事件
                     if not current_node:
@@ -424,6 +465,8 @@ async def get_user_history(
     这里读取的是 LangGraph thread state 里的 messages，
     也就是"短期记忆"部分，而不是你额外存到 PostgreSQL 长期记忆表里的内容。
     """
+    # history 读取的是 checkpoint 中的短期消息；长期记忆不是聊天记录，不在
+    # 这里拼接，避免把内部上下文重复展示给用户。
     try:
         chat_history = await svc.get_history(
             thread_id=current_user.id,
@@ -503,6 +546,9 @@ async def chat_resume_stream(
     流式恢复被 interrupt 暂停的写作流程。
     """
     async def event_generator():
+        # resume 与普通 stream 使用同一套事件翻译，但输入由前端动作转换成
+        # Command(resume=...)；恢复后仍可能再次遇到 interrupt，因此循环中
+        # 继续监听并转发 interrupt。
         try:
             yield sse_event(
                 "status",
@@ -539,7 +585,7 @@ async def chat_resume_stream(
                                 final_sources = sources
 
                     if "__interrupt__" in event_data:
-                        interrupt_data = event_data["__interrupt__"]
+                        interrupt_data = normalize_interrupt_payload(event_data["__interrupt__"])
                         yield sse_event("interrupt", content=interrupt_data)
                         return
 

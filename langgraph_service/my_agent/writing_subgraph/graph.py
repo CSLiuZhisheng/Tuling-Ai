@@ -40,7 +40,9 @@ from my_agent.writing_subgraph.nodes import (
 # 构建写作子工作流图
 # ==============================
 
-# 创建状态图实例，使用 WritingState 作为状态类型
+# 创建状态图实例，使用 WritingState 作为状态类型。
+# 写作子图内部字段（outline、review_feedback 等）不会自动成为主图的顶层
+# 业务字段，父图通过 call_writing_subgraph 明确做输入/输出映射。
 builder = StateGraph(WritingState)
 
 # ----- 添加所有节点 -----
@@ -126,4 +128,3 @@ builder.add_edge("format_output", END)
 # 编译后的子图可以作为节点添加到主图中
 # LangGraph 会自动处理子图与主图之间的状态映射
 writing_subgraph = builder.compile()
-

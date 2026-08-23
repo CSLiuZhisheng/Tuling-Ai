@@ -1,3 +1,11 @@
+"""用户、登录和管理员接口。
+
+鉴权依赖链为：
+``get_current_user`` 验证 JWT 并查用户 -> ``get_current_active_user`` 排除
+禁用用户 -> ``get_current_admin_user`` 再检查 admin 角色。其他路由只需声明
+相应的 Depends，即可复用这条链。
+"""
+
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -37,6 +45,8 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
+    # OAuth2PasswordBearer 先从 Authorization: Bearer 头取出 token；这里再
+    # 验证签名、过期时间和 token type，并通过数据库确认用户仍然存在。
     try:
         token_data: TokenData = decode_token(token)
         if token_data.username is None:
@@ -53,6 +63,8 @@ async def get_current_user(
 async def get_current_active_user(
     current_user: Annotated[User, Depends(get_current_user)]
 ) -> User:
+    # JWT 本身不会随着管理员禁用用户而失效，所以每次请求都要检查数据库中
+    # 的 disabled 状态。
     if current_user.disabled:
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
@@ -61,6 +73,7 @@ async def get_current_active_user(
 async def get_current_admin_user(
     current_user: Annotated[User, Depends(get_current_active_user)]
 ) -> User:
+    # 管理员依赖建立在 active 依赖之上：禁用的管理员也不能继续访问管理 API。
     if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -74,6 +87,8 @@ async def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db),
 ) -> Token:
+    # 登录成功后同时返回短期 access token 和较长期 refresh token；后续普通
+    # 请求只携带 access token，过期后通过 refresh 接口轮转令牌。
     user = authenticate_user(db, form_data.username, form_data.password)
     if not user:
         raise HTTPException(

@@ -1,3 +1,9 @@
+"""用户表的数据访问层。
+
+Repository 只处理 ORM 查询、提交和刷新，不决定密码策略或 HTTP 错误码；这些
+业务规则分别由 auth_service 和 users 路由负责。
+"""
+
 from __future__ import annotations
 
 from sqlalchemy import select
@@ -36,6 +42,7 @@ class UserRepository:
         注意这里传入的是 `hashed_password`，
         说明密码哈希动作应该在 service 层完成，而不是 repository 层处理。
         """
+        # repository 接收的已经是哈希密码，避免数据访问层意外接触明文密码。
         user = UserModel(
             username=username,
             hashed_password=hashed_password,
@@ -96,7 +103,7 @@ class UserRepository:
         return user
 
     def delete_user(self, username: str) -> None:
-        """删除用户。"""
+        """删除用户；不存在时保持幂等，不抛出 ORM 异常。"""
         user = self.get_by_username(username)
         if user is not None:
             self.db.delete(user)

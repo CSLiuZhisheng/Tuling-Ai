@@ -1,3 +1,16 @@
+"""主图节点实现和主图与写作子图之间的适配逻辑。
+
+可以把本模块看成一个“业务节点层”：
+
+1. ``intent_router`` 根据显式开关或模型判断请求类型；
+2. knowledge/chat/writing 节点分别处理三种业务；
+3. ``knowledge_guard`` 在知识库结果不足时切换搜索兜底；
+4. ``finalize`` 把内部状态整理成稳定的 answer/sources/intent。
+
+节点返回的是状态增量，不是完整状态。消息历史由 ``add_messages`` 合并，
+短期摘要由 ``SummarizationNode`` 维护，避免每个节点各自裁剪历史。
+"""
+
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -40,7 +53,12 @@ summarization_node = SummarizationNode(
 
 
 def get_latest_user_query(state: GraphState) -> str:
-    """从 messages 中提取最近一条用户消息，作为当前轮的 query。"""
+    """从 messages 中提取最近一条用户消息，作为当前轮的 query。
+
+    不能直接取 messages 的最后一项，因为历史中可能刚追加了 AIMessage、
+    SystemMessage 或写作子图的交互消息；倒序查找 human 消息才能稳定定位本轮
+    用户输入。
+    """
     messages = state.get("messages", [])
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
@@ -83,7 +101,8 @@ def is_writing_request(query: str) -> bool:
 
 async def intent_router(state: GraphState) -> GraphState:
     """主智能体：识别当前请求应路由到知识库、写作还是闲聊。"""
-    # 如果前端显式指定了 knowledge_bool，直接按用户意图路由
+    # 如果前端显式指定了 knowledge_bool，直接按用户意图路由。
+    # 显式开关优先级高于 LLM 分类，保证用户关闭知识库时不会发生隐藏检索。
     knowledge_bool = state.get("knowledge_bool")
     if knowledge_bool is True:
         return {"intent": "knowledge"}
@@ -175,6 +194,8 @@ async def knowledge_agent(state: GraphState) -> GraphState:
     tool_args: dict = {
         "query": query,
     }
+    # knowledge_agent 不直接访问 RAG HTTP；MCP 是 Agent 与检索系统之间的
+    # 边界，返回结果在这里解析为统一的 answer/sources。
     response = await call_mcp_tool("query_rag", tool_args)
     print("knowledge_agent response:", response)
 
@@ -249,7 +270,12 @@ async def chat_agent(state: GraphState) -> GraphState:
 
 
 def finalize(state: GraphState) -> GraphState:
-    """收尾节点：返回业务字段。"""
+    """收尾节点：返回业务字段。
+
+    下游节点可能把 sources 放在状态字段，也可能放在 AIMessage 的
+    ``additional_kwargs`` 中。这里统一从最终 AI 消息恢复来源，确保知识库
+    引用不会因为经过 fallback 或子图包装而丢失。
+    """
     # 从最后一条AI消息中提取sources（统一从AIMessage中获取）
     sources = []
     messages = state.get("messages", [])
@@ -299,6 +325,8 @@ async def call_writing_subgraph(state: GraphState) -> dict:
     """
     from my_agent.writing_subgraph import writing_subgraph
 
+    # 父图只把当前用户 query 交给子图；子图内部的 requirements/outline/draft
+    # 等中间字段不写入父图，防止两个状态模型互相污染。
     # 从父图状态中提取用户消息作为 query
     query = get_latest_user_query(state)
     print(f"[writing_workflow] 调用写作子图 | query={query[:50]}...")

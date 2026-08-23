@@ -1,3 +1,10 @@
+"""旧 LangGraph Server/SDK 客户端适配层。
+
+该类保留给原有 ``/api/chat`` 路由使用。它与 custom_langgraph_service 的区别
+是协议不同：本类调用官方 SDK 的 threads/runs 接口，后者调用项目自定义的
+FastAPI JSON/SSE 接口；两者共享同一套业务身份映射思路。
+"""
+
 from __future__ import annotations
 
 import json
@@ -36,12 +43,18 @@ class LangGraphService:
         当提供 conversation_id 时，每个会话对应独立的 LangGraph Thread。
         否则使用 thread_id 作为唯一标识（兼容旧逻辑）。
         """
+        # UUID5 是确定性的：相同用户和会话每次都得到同一个 LangGraph thread，
+        # 服务重启后仍能从 checkpointer 恢复短期历史。
         if conversation_id:
             return str(uuid5(NAMESPACE_URL, f"langgraph-thread:{thread_id}:{conversation_id}"))
         return str(uuid5(NAMESPACE_URL, f"langgraph-thread:{thread_id}"))
 
     async def _ensure_thread(self, thread_id: str) -> None:
-        """确保 LangGraph thread 已存在；已存在则忽略。"""
+        """确保 LangGraph thread 已存在；已存在则忽略。
+
+        SDK 的 runs 调用依赖先有 thread。并发首次请求可能同时 create，因此
+        对 409/already exists 做幂等处理。
+        """
         try:
             await self.client.threads.get(thread_id)
             return
@@ -78,6 +91,8 @@ class LangGraphService:
 
     def _extract_answer(self, payload: dict[str, Any]) -> tuple[str, list[Any], str]:
         """兼容不同 LangGraph 返回结构，提取 answer / sources / intent。"""
+        # interrupt 没有普通 answer，先返回特殊标记，让上层进入专门的
+        # 澄清/人工审阅响应分支，而不是把暂停对象当作普通文本。
         # 检测 interrupt 事件（人机交互）
         interrupt_data = payload.get("__interrupt__")
         if interrupt_data:
@@ -135,6 +150,8 @@ class LangGraphService:
         - 当前轮输入直接作为 `messages` 传入
         - 同一个 `thread_id` 下，历史消息由 checkpointer 自动恢复
         """
+        # main_service 的 thread_id 实际是业务用户标识；同一用户的不同会话
+        # 通过 conversation_id 进一步分隔成独立 LangGraph thread。
         graph_thread_id = self._thread_uuid(thread_id, conversation_id)
         await self._ensure_thread(graph_thread_id)
 
@@ -217,6 +234,8 @@ class LangGraphService:
         - messages 模式：token 级别的流式输出
         - updates 模式：节点级别的状态更新
         """
+        # stream 与 wait 使用完全相同的输入结构和 thread 映射，区别只在于
+        # SDK 是否逐步返回 messages/updates 事件。
         graph_thread_id = self._thread_uuid(thread_id, conversation_id)
         print(f"[LangGraph] chat_stream: {graph_thread_id}")
         await self._ensure_thread(graph_thread_id)
@@ -326,7 +345,8 @@ class LangGraphService:
         """
         graph_thread_id = self._thread_uuid(thread_id, conversation_id)
 
-        # 构造 resume 数据
+        # 构造 resume 数据。它必须匹配写作节点 interrupt 时约定的字段名，
+        # clarify 读取 answer，人工审阅读取 action/content。
         if action == "clarify":
             # 澄清回答：使用 {"answer": "..."} 格式
             resume_data = {"answer": answer or content or ""}
