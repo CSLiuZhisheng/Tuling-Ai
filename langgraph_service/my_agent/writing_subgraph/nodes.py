@@ -371,7 +371,6 @@ async def review(state: WritingState) -> WritingState:
     """
     draft_text = state.get("draft", "")
     requirements = state.get("requirements", "")
-    print(requirements)
     logger.info(f"[review] 开始审稿检查 | 草稿长度={len(draft_text)}")
     llm = get_llm()
 
@@ -426,10 +425,6 @@ async def human_review(state: WritingState) -> WritingState:
     logger.info(f"[human_review] 进入人机交互 | 草稿长度={len(draft_text)}")
     logger.info(f"[human_review] 草稿前100字: {draft_text}...")
     content = f"{draft_text}"
-     # 先把"发给用户的内容"写入消息历史
-    review_message = AIMessage(content=content)
-
-
     # 使用 interrupt 暂停执行，将草稿发送给用户审阅。
     #
     # 这里故意只把草稿放在 ``draft`` 字段中，不再额外放一个 ``message``
@@ -453,15 +448,13 @@ async def human_review(state: WritingState) -> WritingState:
     if action == "approve":
         human_message = HumanMessage(content=f"用户操作：确认通过")
         logger.info("[human_review] 用户确认通过，进入格式化")
-        return {"messages": [review_message, human_message],
-                "human_action": "approve"}
+        return {"human_action": "approve"}
     elif action == "edit":
         # 用户修改了内容，更新 draft
         edited_content = user_feedback.get("content", draft_text)
         logger.info(f"[human_review] 用户修改内容 | 修改后长度={len(edited_content)}")
         human_message = HumanMessage(content=f"用户操作：修改内容")
         return {
-            "messages": [review_message, human_message],
             "human_action": "edit",
             "human_edited_content": edited_content,
         }
@@ -469,14 +462,13 @@ async def human_review(state: WritingState) -> WritingState:
         logger.info("[human_review] 用户选择重新生成，回到 draft 节点")
         human_message = HumanMessage(content=f"用户操作：重新生成")
         return {
-            "messages": [review_message, human_message], 
             "human_action": "rewrite"
         }
     else:
         logger.warning(f"[human_review] 未知操作: {action}，默认确认通过")
         human_message = HumanMessage(content=f"用户操作：确认通过")
         return {
-            "messages": [review_message, human_message],
+            "messages": [human_message],
             "human_action": "approve"
         }
 

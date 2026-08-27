@@ -16,7 +16,7 @@ class Settings:
 
     API_KEY: Optional[str] = os.getenv("DASHSCOPE_API_KEY")
     API_BASE_URL: Optional[str] = os.getenv("DASHSCOPE_BASE_URL")
-    MODEL: str = "qwen-flash-character-2026-02-26"  # os.getenv("DASHSCOPE_MODEL", "qwen-plus")
+    MODEL: str = os.getenv("RAG_DASHSCOPE_MODEL", "qwen-plus")
     TEMPERATURE: float = float(os.getenv("MODEL_TEMPERATURE", "0.1"))
     EMBEDDING_MODEL_PATH: str = os.getenv(
         "EMBEDDING_MODEL_PATH",

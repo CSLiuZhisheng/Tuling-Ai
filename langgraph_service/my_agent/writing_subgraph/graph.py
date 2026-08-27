@@ -125,6 +125,6 @@ builder.add_conditional_edges(
 builder.add_edge("format_output", END)
 
 # ----- 编译子图 -----
-# 编译后的子图可以作为节点添加到主图中
-# LangGraph 会自动处理子图与主图之间的状态映射
+# 编译后的子图由父图的 writing_workflow 包装节点调用，
+# 通过包装函数明确控制输入输出字段。
 writing_subgraph = builder.compile()

@@ -28,6 +28,7 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 
 from config.settings import Settings
 from my_agent.utils.nodes import (
+    call_writing_subgraph,
     chat_agent,
     fallback_search_agent,
     finalize,
@@ -37,7 +38,6 @@ from my_agent.utils.nodes import (
     summarization_node,
 )
 from my_agent.utils.state import GraphState
-from my_agent.writing_subgraph import writing_subgraph
 
 
 async def load_long_term_memory(state: GraphState) -> dict[str, Any]:
@@ -157,11 +157,9 @@ def build_graph_builder() -> StateGraph:
     builder.add_node("intent_router", intent_router)
     builder.add_node("knowledge_agent", knowledge_agent)
     builder.add_node("fallback_search", fallback_search_agent)
-    # 直接挂载已编译的写作子图，而不是通过一个 ``ainvoke`` 包装函数
-    # 调用它。直接挂载后，父图使用 ``subgraphs=True`` 流式执行时，
-    # 才能把 understand、draft、review、human_review 等子节点事件和
-    # interrupt 传递到 HTTP 层。
-    builder.add_node("writing_workflow", writing_subgraph)
+    # 通过包装函数调用写作子图。父图只接收包装函数明确返回的
+    # answer/sources/messages，不把子图的中间字段写入父图状态。
+    builder.add_node("writing_workflow", call_writing_subgraph)
     builder.add_node("chat_agent", chat_agent)
     builder.add_node("finalize", finalize)
     builder.add_node("save_long_term_memory", save_long_term_memory)

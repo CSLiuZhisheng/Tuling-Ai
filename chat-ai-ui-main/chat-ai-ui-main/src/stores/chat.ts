@@ -87,15 +87,12 @@ export const useChatStore = defineStore('chat', () => {
   const conversations = ref<Conversation[]>([]);
   const currentConversationId = ref<string | null>(null);
 
-  // 文章撰写相关状态
-  const articleContent = ref('');  // 文章内容
-  const isArticleWriting = ref(false);  // 是否正在撰写文章
-  const currentNode = ref('');  // 当前执行的节点名称
-
   const userStore = useUserStore();
 
   // 用于中止 fetch 请求
   let abortController: AbortController | null = null;
+  let conversationsRequest: Promise<void> | null = null;
+  let historyAbortController: AbortController | null = null;
 
   // ===== 会话管理方法 =====
 
@@ -104,15 +101,22 @@ export const useChatStore = defineStore('chat', () => {
    */
   const loadConversations = async () => {
     if (!userStore.token) return;
+    if (conversationsRequest) return conversationsRequest;
+
+    conversationsRequest = (async () => {
     try {
       const { data } = await axios.get(
         `${import.meta.env.VITE_API_URL}/api/chat/conversations`,
-        { headers: { 'Authorization': `Bearer ${userStore.token}` } }
+        { headers: { 'Authorization': `Bearer ${userStore.token}` }, timeout: 15000 }
       );
       conversations.value = data.conversations || [];
     } catch (error) {
       console.error('Error loading conversations:', error);
+    } finally {
+      conversationsRequest = null;
     }
+    })();
+    return conversationsRequest;
   };
 
   /**
@@ -147,6 +151,7 @@ export const useChatStore = defineStore('chat', () => {
    */
   const switchConversation = async (conversationId: string) => {
     if (currentConversationId.value === conversationId) return;
+    historyAbortController?.abort();
     currentConversationId.value = conversationId;
     messages.value = [];
     await loadChatHistory();
@@ -205,17 +210,33 @@ export const useChatStore = defineStore('chat', () => {
   const loadChatHistory = async () => {
     if (!userStore.token || !currentConversationId.value) return;
 
+    historyAbortController?.abort();
+    const controller = new AbortController();
+    historyAbortController = controller;
+    const requestedConversationId = currentConversationId.value;
+
     try {
       const { data } = await axios.get(
         `${import.meta.env.VITE_API_URL}/api/custom-chat/history`,
         {
-          params: { conversation_id: currentConversationId.value },
-          headers: { 'Authorization': `Bearer ${userStore.token}` }
+          params: { conversation_id: requestedConversationId },
+          headers: { 'Authorization': `Bearer ${userStore.token}` },
+          timeout: 15000,
+          signal: controller.signal,
         }
       );
-      messages.value = data.filter((msg: ChatMessage) => msg);
+      if (currentConversationId.value === requestedConversationId && !controller.signal.aborted) {
+        messages.value = Array.isArray(data) ? data.filter((msg: ChatMessage) => msg) : [];
+      }
     } catch (error) {
-      console.error('Error loading chat history:', error);
+      // 清空后的会话在 LangGraph 中没有 checkpoint，按空历史展示即可。
+      if (axios.isCancel(error) || (axios.isAxiosError(error) && error.response?.status === 404)) {
+        if (currentConversationId.value === requestedConversationId) messages.value = [];
+      } else {
+        console.error('Error loading chat history:', error);
+      }
+    } finally {
+      if (historyAbortController === controller) historyAbortController = null;
     }
   };
 
@@ -337,16 +358,6 @@ export const useChatStore = defineStore('chat', () => {
                 }
               } else if (data.type === "node_start") {
                 // 中间步骤开始，更新状态
-                currentNode.value = data.node || '';
-                
-                // 如果进入 draft 节点，开始文章撰写模式
-                if (data.node === 'draft') {
-                  // 草稿是独立的预览区域。每次重新进入 draft 都代表新一轮
-                  // 生成，所以清空旧草稿，避免 rewrite 后两版文章连接在一起。
-                  isArticleWriting.value = true;
-                  articleContent.value = '';  // 清空之前的文章内容
-                }
-                
                 if (!data.is_display) {
                   // 非显示节点，显示加载状态
                   messages.value[aiMessageIndex].currentStep = data.label || '';
@@ -357,12 +368,6 @@ export const useChatStore = defineStore('chat', () => {
                   messages.value[aiMessageIndex].currentStep = '';
                   messages.value[aiMessageIndex].isWriting = false;
                   currentWritingStep.value = '';
-                }
-              } else if (data.type === "article") {
-                // article 只更新草稿预览，不写入普通 AI 消息；最终通过
-                // content 事件输出的文章才会进入聊天记录。
-                if (data.content) {
-                  articleContent.value += data.content;
                 }
               } else if (data.type === "interrupt") {
                 // 收到 interrupt 事件，进入人机交互模式
@@ -395,14 +400,14 @@ export const useChatStore = defineStore('chat', () => {
                 isLoading.value = false;
                 currentWritingStep.value = '';
                 
-                // 文章撰写完成，保留文章内容供用户审阅
-                isArticleWriting.value = false;
-                
                 reader.releaseLock();
                 return;
               } else if (data.type === "content" || data.type === "text") {
                 // 只有标记 is_display 的内容才是用户答案。内部摘要、路由和
                 // 长期记忆不会被写入消息气泡，即使后端为了调试转发了 update。
+                if (Array.isArray(data.sources)) {
+                  messages.value[aiMessageIndex].sources = data.sources;
+                }
                 if (data.content && data.is_display) {
                   if (!receivedFirstContent) {
                     receivedFirstContent = true;
@@ -463,6 +468,10 @@ export const useChatStore = defineStore('chat', () => {
       if (action === 'edit' && content) {
         messages.value[reviewingIndex].content = content;
       }
+      // 草稿只用于审阅面板。恢复后最终文章会写入新的 AI 消息，
+      // 清空旧气泡，避免草稿和最终文章同时显示成两份内容。
+      messages.value[reviewingIndex].content = '';
+      messages.value[reviewingIndex].draft = '';
       messages.value[reviewingIndex].isReviewing = false;
     }
 
@@ -573,6 +582,9 @@ export const useChatStore = defineStore('chat', () => {
                 return;
               } else if (data.type === "content" || data.type === "text") {
                 // 只显示 is_display 节点的内容
+                if (Array.isArray(data.sources)) {
+                  messages.value[aiMessageIndex].sources = data.sources;
+                }
                 if (data.content && data.is_display) {
                   if (!receivedFirstContent) {
                     receivedFirstContent = true;
@@ -635,13 +647,6 @@ export const useChatStore = defineStore('chat', () => {
     messages.value[index].isReviewing = true;
     messages.value[index].draft = draft;
     isWaitingReview.value = true;
-  };
-
-  // 清除文章内容
-  const clearArticle = () => {
-    articleContent.value = '';
-    isArticleWriting.value = false;
-    currentNode.value = '';
   };
 
   /**
@@ -759,6 +764,9 @@ export const useChatStore = defineStore('chat', () => {
                 return;
               } else if (data.type === "content" || data.type === "text") {
                 // 只显示 is_display 节点的内容
+                if (Array.isArray(data.sources)) {
+                  messages.value[aiMessageIndex].sources = data.sources;
+                }
                 if (data.content && data.is_display) {
                   if (!receivedFirstContent) {
                     receivedFirstContent = true;
@@ -803,10 +811,6 @@ export const useChatStore = defineStore('chat', () => {
     // 会话相关状态
     conversations,
     currentConversationId,
-    // 文章相关状态
-    articleContent,
-    isArticleWriting,
-    currentNode,
     // 会话管理方法
     loadConversations,
     createConversation,
@@ -820,15 +824,11 @@ export const useChatStore = defineStore('chat', () => {
     submitClarification,
     pauseStream,
     setMessageReviewing,
-    clearArticle,
     // 重置方法
     resetStore: () => {
       messages.value = [];
       conversations.value = [];
       currentConversationId.value = null;
-      articleContent.value = '';
-      isArticleWriting.value = false;
-      currentNode.value = '';
       isLoading.value = false;
       isWaitingReview.value = false;
       isWaitingClarification.value = false;

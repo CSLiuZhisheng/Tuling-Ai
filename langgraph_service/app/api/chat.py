@@ -221,6 +221,14 @@ def _is_internal_message(message: Any, text: str) -> bool:
     return message_type == "system" or text.startswith(_INTERNAL_MEMORY_PREFIX)
 
 
+def _is_message_chunk(message: Any) -> bool:
+    """只识别真正的流式消息块，避免转发节点完成后的完整消息。"""
+
+    message_type = message.get("type", "") if isinstance(message, dict) else getattr(message, "type", "")
+    class_name = type(message).__name__
+    return str(message_type).endswith("MessageChunk") or class_name.endswith("MessageChunk")
+
+
 def _public_history(messages: Any) -> list[Any]:
     """只保留前端需要展示的历史消息。
 
@@ -262,6 +270,15 @@ def _writing_node_name(part: dict[str, Any], data: Any) -> str:
     def find_in_mapping(mapping: Any) -> str:
         if not isinstance(mapping, dict):
             return ""
+        # 使用包装函数调用子图时，子图的最终结果会作为
+        # {"writing_workflow": {"answer": ...}} 回到父图。这里只把
+        # writing_workflow 下的 answer 识别为最终文章，避免把普通
+        # finalize.answer 误转成第二份 content 事件。
+        writing_result = mapping.get("writing_workflow")
+        if isinstance(writing_result, dict) and (
+            "answer" in writing_result or "formatted_content" in writing_result
+        ):
+            return "format_output"
         # 子图更新有时是 {"writing_workflow": {"draft": ...}}，
         # 有时是 {"draft": ...}。递归检查可以同时兼容两类结构。
         for key, nested in mapping.items():
@@ -293,6 +310,14 @@ def _update_payload(data: Any, node_name: str) -> dict[str, Any]:
 
     if not isinstance(data, dict):
         return {}
+    # 包装调用模式下，子图结果由父图节点一次性返回：
+    # {"writing_workflow": {"answer": ..., "messages": [...]}}。
+    if node_name == "format_output":
+        writing_result = data.get("writing_workflow")
+        if isinstance(writing_result, dict) and (
+            "answer" in writing_result or "formatted_content" in writing_result
+        ):
+            return writing_result
     if node_name in data and isinstance(data[node_name], dict):
         return data[node_name]
 
@@ -306,16 +331,50 @@ def _update_payload(data: Any, node_name: str) -> dict[str, Any]:
     return data
 
 
+def _answer_update_event(data: Any) -> tuple[str, dict[str, Any]] | None:
+    """把一次性返回答案的节点更新转换成前端 content 事件。
+
+    knowledge_agent 和 fallback_search_agent 使用 ``ainvoke``，更新中携带
+    完整的 ``answer``，不会产生 ``AIMessageChunk``。普通 chat_agent 则通过
+    messages 事件发送 token，因此不能把所有节点的 answer 都再次转发。
+    """
+
+    if not isinstance(data, dict):
+        return None
+    for node_name in ("knowledge_agent", "fallback_search"):
+        payload = data.get(node_name)
+        if not isinstance(payload, dict):
+            continue
+        text = str(payload.get("answer") or "")
+        sources = payload.get("sources", []) or []
+        if not sources:
+            for message in payload.get("messages", []) or []:
+                if not isinstance(message, dict):
+                    continue
+                additional_kwargs = message.get("additional_kwargs", {})
+                if isinstance(additional_kwargs, dict):
+                    sources = additional_kwargs.get("sources", []) or []
+                    if sources:
+                        break
+        if text:
+            return "content", {
+                "content": text,
+                "sources": _jsonable(sources),
+                "is_display": True,
+            }
+    return None
+
+
 def _writing_events(
     part: dict[str, Any],
-    emitted: dict[str, str],
     started_nodes: set[str],
 ) -> list[tuple[str, dict[str, Any]]]:
-    """把 LangGraph updates 转换成旧前端使用的写作事件。
+    """把 LangGraph updates 转换成前端使用的写作状态和最终内容事件。
 
     写作子图中的 ``outline``、``draft``、``review`` 等节点大多使用
     ``ainvoke``，不会产生普通 token 流；它们的结果会出现在 updates 中。
-    这里将完整字段转换成稳定的业务事件，前端仍可使用既有的写作状态展示。
+    草稿正文在 interrupt 中发送给前端审阅，只有 format_output 的最终结果
+    需要在这里转换为 content 事件。
     """
 
     data = part.get("data")
@@ -333,54 +392,14 @@ def _writing_events(
         }))
 
     payload = _update_payload(data, node_name)
-    if node_name == "draft":
-        text = str(payload.get("draft") or "")
-        # draft/revise 可能再次生成一篇全新的完整文章。新文本与旧文本
-        # 不存在前缀关系时，必须从新文章开始累计，不能把两版文章拼接起来。
-        delta = _append_delta(emitted, "article", text, reset_on_replacement=True)
-        if delta:
-            result.append(("article", {"content": delta}))
-    elif node_name == "format_output":
+    # 子图内部的 format_output 只保留为状态更新；最终文章统一从父图
+    # 当前拿到的是否是“父图 writing_workflow 包装节点返回的最终结果
+    if node_name == "format_output" and isinstance(data, dict) and "writing_workflow" in data:
         text = str(payload.get("answer") or payload.get("formatted_content") or "")
-        delta = _append_delta(emitted, "content", text, reset_on_replacement=True)
-        if delta:
-            result.append(("content", {"content": delta, "is_display": True}))
+        if text:
+            result.append(("content", {"content": text, "is_display": True}))
 
     return result
-
-
-def _append_delta(
-    emitted: dict[str, str],
-    stream_key: str,
-    text: str,
-    reset_on_replacement: bool = False,
-) -> str:
-    """从增量或累计消息中提取本次真正新增的文本。
-
-    有些模型返回 ``"你"``、``"好"`` 这样的增量 token；另一些适配器会
-    返回 ``"你"``、``"你好"`` 这样的累计文本。两种格式都支持：
-
-    - 新文本以已输出内容开头时，只发送尾部新增部分；
-    - 新文本不是前缀时，按增量 token 处理；
-    - 和上次完全相同的消息视为重复事件，直接丢弃。
-
-    ``emitted`` 按节点保存状态，可以同时处理多个节点，又不会把同一节点
-    在父图和子图中产生的重复事件再次发给前端。写作节点的结果通常是
-    “一次性完整文本”，因此调用方可以打开 ``reset_on_replacement``，让
-    新一轮重写覆盖旧稿；普通 token 流则继续按增量方式拼接。
-    """
-
-    if not text:
-        return ""
-    previous = emitted.get(stream_key, "")
-    if text == previous:
-        return ""
-    if previous and text.startswith(previous):
-        delta = text[len(previous):]
-        emitted[stream_key] = text
-        return delta
-    emitted[stream_key] = text if reset_on_replacement else previous + text
-    return text
 
 
 async def _run(
@@ -446,15 +465,11 @@ async def _stream(request: ChatRequest, run_id: str) -> AsyncIterator[str]:
     }
     if request.knowledge_bool is not None:
         input_state["knowledge_bool"] = request.knowledge_bool
-    # 记录每个展示节点已经发送过的文本。不要在前端去重，因为同一个 SSE
-    # 可能同时被多个前端页面消费，服务端统一处理更可靠。
-    #
-    # 例如 chat_agent 可能先产生 "你"，随后产生累计值 "你好"；也可能父图
-    # 和子图各自把同一个结果发一次。_append_delta 会把这两种情况都折叠成
-    # 前端真正应该追加的字符。
-    emitted_by_node: dict[str, str] = {}
     started_nodes: set[str] = set()
     try:
+        # 前端按 conversation_id 事件保存新会话；start 事件保留给需要
+        # 运行元数据的客户端，两个事件都由 LangGraph 服务统一生成。
+        yield _event("conversation_id", {"content": request.conversation_id})
         yield _event("start", {"run_id": run_id, "conversation_id": request.conversation_id})
         async for part in runtime.require_graph().astream(
             input_state,
@@ -473,23 +488,25 @@ async def _stream(request: ChatRequest, run_id: str) -> AsyncIterator[str]:
                 text = _message_text(message)
                 if _is_internal_message(message, text):
                     continue
-                # 有节点元数据时严格按展示节点过滤；没有元数据时保留兼容性，
-                # 但仍使用去重逻辑，避免不同版本 LangGraph 造成重复输出。
+                if not _is_message_chunk(message):
+                    continue
+                # 有节点元数据时严格按展示节点过滤；没有元数据时保留兼容性。
                 #
                 # 这里不能把所有 AIMessage 都转发出去，因为 summarize、路由、
                 # 守卫节点也可能产生消息，它们是 Agent 内部推理过程，不是最终
                 # 答案。长期记忆 SystemMessage 也在更早的分支被过滤。
                 if node_name and node_name not in _DISPLAY_NODES:
                     continue
-                stream_key = node_name or "default"
-                content = _append_delta(emitted_by_node, stream_key, text)
-                if content:
-                    yield _event("token", {"content": content, "node": node_name})
+                if text:
+                    yield _event("content", {"content": text, "is_display": True})
             elif event_type == "updates":
-                # updates 承载的是“节点完成后的状态变化”，写作节点的完整大纲、
-                # 草稿和最终文章主要从这里出来。先转换成旧前端理解的业务事件，
+                answer_event = _answer_update_event(data)
+                if answer_event:
+                    yield _event(*answer_event)
+                # updates 承载的是“节点完成后的状态变化”，写作节点的状态和
+                # 最终文章主要从这里出来。先转换成前端理解的业务事件，
                 # 再保留一个通用 update 事件，方便调试和未来扩展字段。
-                for writing_event_type, writing_event in _writing_events(part, emitted_by_node, started_nodes):
+                for writing_event_type, writing_event in _writing_events(part, started_nodes):
                     yield _event(writing_event_type, writing_event)
                 yield _event("update", _jsonable(data))
                 if isinstance(data, dict) and data.get("__interrupt__"):
@@ -585,7 +602,6 @@ async def resume(request: ResumeRequest) -> StreamingResponse:
         task = asyncio.current_task()
         if task is not None:
             _tasks[(thread_id, run_id)] = task
-        emitted_by_node: dict[str, str] = {}
         started_nodes: set[str] = set()
         try:
             async for part in runtime.require_graph().astream(
@@ -604,14 +620,17 @@ async def resume(request: ResumeRequest) -> StreamingResponse:
                         text = _message_text(message)
                         if _is_internal_message(message, text):
                             continue
+                        if not _is_message_chunk(message):
+                            continue
                         if node_name and node_name not in _DISPLAY_NODES:
                             continue
-                        stream_key = node_name or "default"
-                        content = _append_delta(emitted_by_node, stream_key, text)
-                        if content:
-                            yield _event("token", {"content": content, "node": node_name})
+                        if text:
+                            yield _event("content", {"content": text, "is_display": True})
                     elif event_type == "updates":
-                        for writing_event_type, writing_event in _writing_events(part, emitted_by_node, started_nodes):
+                        answer_event = _answer_update_event(data)
+                        if answer_event:
+                            yield _event(*answer_event)
+                        for writing_event_type, writing_event in _writing_events(part, started_nodes):
                             yield _event(writing_event_type, writing_event)
                         yield _event("update", _jsonable(data))
                         if isinstance(data, dict) and data.get("__interrupt__"):

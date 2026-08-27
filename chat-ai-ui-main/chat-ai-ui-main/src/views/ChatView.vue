@@ -306,13 +306,23 @@ watch(
             >
               <button
                 class="chat-view__sources-toggle"
+                type="button"
+                :aria-expanded="!isCollapsed(index)"
+                :aria-label="`${isCollapsed(index) ? '展开' : '收起'}相关来源，共 ${msg.sources.length} 条`"
                 @click="toggleSources(index)"
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <span class="chat-view__sources-icon" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <path d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
-                <span>相关来源 ({{ msg.sources.length }})</span>
+                  </svg>
+                </span>
+                <span class="chat-view__sources-title">
+                  <strong>相关来源</strong>
+                  <span class="chat-view__sources-count">{{ msg.sources.length }}</span>
+                </span>
+                <span class="chat-view__sources-state">{{ isCollapsed(index) ? '查看依据' : '收起' }}</span>
                 <svg
+                  class="chat-view__sources-chevron"
                   width="14"
                   height="14"
                   viewBox="0 0 24 24"
@@ -333,7 +343,8 @@ watch(
                     class="chat-view__source"
                   >
                     <div class="chat-view__source-header">
-                      <span>来源 {{ sourceIndex + 1 }}</span>
+                      <span class="chat-view__source-number">{{ String(sourceIndex + 1).padStart(2, '0') }}</span>
+                      <span class="chat-view__source-label">参考内容 {{ sourceIndex + 1 }}</span>
                     </div>
                     <div
                       class="chat-view__source-body"
@@ -508,40 +519,94 @@ watch(
 /* 来源信息 */
 .chat-view__sources {
   margin-left: 48px;
-  max-width: 600px;
+  max-width: 680px;
+  width: calc(100% - 48px);
 }
 
 .chat-view__sources-toggle {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
+  min-height: 48px;
   padding: var(--space-3) var(--space-4);
-  background-color: var(--color-bg-secondary);
+  background-color: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   font-size: var(--text-sm);
-  color: var(--color-text-secondary);
+  color: var(--color-text);
   transition: all var(--transition-fast);
   width: 100%;
+  text-align: left;
 }
 
 .chat-view__sources-toggle:hover {
-  background-color: var(--color-bg-tertiary);
+  background-color: var(--color-bg-secondary);
+  border-color: var(--color-border-hover);
+  box-shadow: var(--shadow-sm);
 }
 
-.chat-view__sources-toggle svg:last-child {
+.chat-view__sources-toggle:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.chat-view__sources-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  color: var(--color-accent);
+  background-color: var(--color-accent-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.chat-view__sources-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.chat-view__sources-title strong {
+  font-weight: var(--font-semibold);
+}
+
+.chat-view__sources-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 var(--space-1);
+  color: var(--color-accent-dark);
+  background-color: var(--color-accent-subtle);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+}
+
+.chat-view__sources-state {
   margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}
+
+.chat-view__sources-chevron {
+  flex: 0 0 auto;
   transition: transform var(--transition-base);
 }
 
-.chat-view__sources-toggle svg:last-child.rotated {
+.chat-view__sources-chevron.rotated {
   transform: rotate(180deg);
 }
 
 .chat-view__sources-content {
-  margin-top: var(--space-2);
+  margin-top: var(--space-3);
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  gap: var(--space-2);
 }
 
 .chat-view__source {
@@ -549,23 +614,152 @@ watch(
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
+  box-shadow: 0 1px 2px rgba(26, 26, 46, 0.03);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
+}
+
+.chat-view__source:hover {
+  border-color: var(--color-border-hover);
+  box-shadow: var(--shadow-sm);
 }
 
 .chat-view__source-header {
-  padding: var(--space-3) var(--space-4);
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 44px;
+  padding: var(--space-2) var(--space-4);
   font-size: var(--text-sm);
   font-weight: var(--font-medium);
   color: var(--color-text);
   border-bottom: 1px solid var(--color-border);
+  background-color: var(--color-bg-secondary);
+}
+
+.chat-view__source-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  flex: 0 0 28px;
+  color: var(--color-accent-dark);
+  background-color: var(--color-accent-subtle);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-weight: var(--font-bold);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-view__source-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-view__source-body {
-  padding: var(--space-4);
+  padding: var(--space-4) var(--space-5);
   font-size: var(--text-sm);
   color: var(--color-text-secondary);
   line-height: 1.6;
   max-height: 300px;
   overflow-y: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.chat-view__source-body :deep(*) {
+  max-width: 100%;
+}
+
+.chat-view__source-body :deep(p) {
+  margin: 0 0 var(--space-3);
+}
+
+.chat-view__source-body :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.chat-view__source-body :deep(h1),
+.chat-view__source-body :deep(h2),
+.chat-view__source-body :deep(h3),
+.chat-view__source-body :deep(h4) {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text);
+  font-weight: var(--font-semibold);
+  line-height: 1.4;
+}
+
+.chat-view__source-body :deep(h1) { font-size: var(--text-lg); }
+.chat-view__source-body :deep(h2) { font-size: var(--text-base); }
+.chat-view__source-body :deep(h3),
+.chat-view__source-body :deep(h4) { font-size: var(--text-sm); }
+
+.chat-view__source-body :deep(ul),
+.chat-view__source-body :deep(ol) {
+  margin: 0 0 var(--space-3);
+  padding-left: var(--space-5);
+}
+
+.chat-view__source-body :deep(li + li) {
+  margin-top: var(--space-1);
+}
+
+.chat-view__source-body :deep(blockquote) {
+  margin: var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text-secondary);
+  border-left: 3px solid var(--color-accent-light);
+  background-color: var(--color-bg-secondary);
+}
+
+.chat-view__source-body :deep(a) {
+  color: var(--color-accent-dark);
+  text-decoration: underline;
+  text-decoration-color: rgba(58, 92, 229, 0.3);
+  text-underline-offset: 2px;
+}
+
+.chat-view__source-body :deep(a:hover) {
+  color: var(--color-accent);
+  text-decoration-color: currentColor;
+}
+
+.chat-view__source-body :deep(code) {
+  padding: 2px 5px;
+  color: var(--color-text);
+  background-color: var(--color-bg-secondary);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.chat-view__source-body :deep(pre) {
+  margin: var(--space-3) 0;
+  padding: var(--space-3);
+  overflow-x: auto;
+  background-color: var(--color-primary-dark);
+  border-radius: var(--radius-sm);
+}
+
+.chat-view__source-body :deep(pre code) {
+  padding: 0;
+  color: #e5e7eb;
+  background: transparent;
+}
+
+.chat-view__source-body :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.chat-view__source-body :deep(th),
+.chat-view__source-body :deep(td) {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  text-align: left;
 }
 
 /* 折叠动画 */
@@ -807,6 +1001,24 @@ watch(
 
   .chat-view__sources {
     margin-left: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  .chat-view__sources-toggle {
+    padding: var(--space-2) var(--space-3);
+  }
+
+  .chat-view__sources-state {
+    display: none;
+  }
+
+  .chat-view__source-body {
+    padding: var(--space-3);
+  }
+
+  .chat-view__source-header {
+    padding: var(--space-2) var(--space-3);
   }
 }
 </style>

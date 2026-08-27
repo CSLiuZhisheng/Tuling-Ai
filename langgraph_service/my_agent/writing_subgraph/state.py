@@ -57,6 +57,7 @@ class WritingState(TypedDict, total=False):
     # review_passed - 审核是否通过（True=通过，False=需要修订）
     review_feedback: str
     review_passed: bool
+    review_attempts: int
 
     # revise 节点输出：修订后的草稿
     # 根据审核意见修改后的文章内容
@@ -81,4 +82,3 @@ class WritingState(TypedDict, total=False):
     answer: str                              # 最终输出内容
     sources: list[str]                       # 来源信息（写作场景暂为空列表）
     messages: Annotated[list[Any], add_messages]  # 消息列表（用于历史记录）
-

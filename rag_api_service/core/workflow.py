@@ -154,7 +154,7 @@ class RAGWorkflow(Workflow):
             query=ev.query,
             nodes=ev.nodes
         )
-
+        print(f"生成的回答: {response}")
         # 如果是流式，response 是 StreamingResponse 对象，不能直接 str()
         # 如果是非流式，response 是 Response 对象，str() 获取文本
         response_payload = response if self.streaming else str(response)

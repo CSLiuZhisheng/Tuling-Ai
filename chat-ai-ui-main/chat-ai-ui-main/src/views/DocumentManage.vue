@@ -2,7 +2,7 @@
 import { ref, reactive, onMounted, computed } from 'vue';
 import axios from 'axios';
 
-const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const VITE_API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
 
 interface DocInfo {
   file_name: string;

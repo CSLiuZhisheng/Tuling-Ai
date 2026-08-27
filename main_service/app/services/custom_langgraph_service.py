@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, AsyncIterator
 
 import httpx
@@ -19,13 +18,15 @@ class CustomLangGraphService:
     """面向业务的 LangGraph HTTP 客户端。
 
     它是 main_service 与 langgraph_service 之间的协议适配层：上层传入
-    ``query``，下游收到 ``message``；下游返回自定义 SSE，本文负责逐行解析
-    为 Python 字典，具体的前端事件名称由 custom_chat 路由决定。
+    ``query``，下游收到 ``message``；流式接口直接返回下游的 SSE 文本，
+    不在 main_service 做事件解析或字段转换。
     """
 
     def __init__(self, base_url: str | None = None) -> None:
         self.base_url = (base_url or Settings.LANGGRAPH_API_URL).rstrip("/")
-        self.timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+        # 普通 JSON 请求必须有读取上限；只有 SSE 流式请求允许长期等待。
+        # 如果把 read=None 复用于历史接口，下游连接异常时页面会永久 pending。
+        self.timeout = httpx.Timeout(connect=10.0, read=20.0, write=30.0, pool=10.0)
         # 复用 HTTP 连接，避免每次读取历史都重新创建 TCP 连接和连接池。
         # 该客户端在 main_service 进程生命周期内保持，服务关闭时由 lifespan
         # 调用 close() 释放连接。
@@ -77,26 +78,20 @@ class CustomLangGraphService:
         response.raise_for_status()
         return response.json()
 
-    async def chat_stream(self, *, thread_id: str, conversation_id: str | None = None, query: str, knowledge_bool: bool | None = None) -> AsyncIterator[dict[str, Any]]:
-        """解析自定义 SSE，并逐条返回 ``{"type": ..., ...}`` 字典。"""
+    async def chat_stream(self, *, thread_id: str, conversation_id: str | None = None, query: str, knowledge_bool: bool | None = None) -> AsyncIterator[str]:
+        """逐行返回下游 SSE，保持事件内容不变。"""
 
         # 流式请求不能使用普通的短 read timeout，否则模型长时间生成时会被
         # httpx 误判为超时；类初始化时已将 read timeout 设为 None。
         client = await self._get_client()
         # read=None 表示不限制响应读取时间。流式模型可能持续输出较长时间，
         # 如果沿用普通请求的 read timeout，客户端会在模型尚未结束时误判超时。
-        async with client.stream("POST", f"{self.base_url}/api/chat/stream", json=self._payload(thread_id=thread_id, conversation_id=conversation_id, query=query, knowledge_bool=knowledge_bool)) as response:
+        stream_timeout = httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0)
+        async with client.stream("POST", f"{self.base_url}/api/chat/stream", json=self._payload(thread_id=thread_id, conversation_id=conversation_id, query=query, knowledge_bool=knowledge_bool), timeout=stream_timeout) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
-                # SSE 允许空行分隔事件，也允许注释行。服务端每个事件只有一行
-                # data，因此这里只消费 data: 行，忽略其他协议行。
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data:
-                    # 自定义服务已经把 LangGraph 内部事件变成稳定 JSON；代理层
-                    # 不再理解图状态，只负责反序列化后交给上层路由映射。
-                    yield json.loads(data)
+                # 保留 SSE 的所有行和空行，由调用方原样写回客户端。
+                yield line
 
     async def get_history(self, *, thread_id: str, conversation_id: str | None = None) -> list[dict[str, Any]]:
         """读取自定义服务返回的消息列表。"""
@@ -125,8 +120,8 @@ class CustomLangGraphService:
         response = await client.post(f"{self.base_url}/api/chat/cancel", json={"user_id": str(thread_id), "conversation_id": conversation_id})
         response.raise_for_status()
 
-    async def resume_stream(self, *, thread_id: str, conversation_id: str | None = None, action: str, content: str | None = None, answer: str | None = None) -> AsyncIterator[dict[str, Any]]:
-        """提交 interrupt 恢复参数并解析返回的 SSE。"""
+    async def resume_stream(self, *, thread_id: str, conversation_id: str | None = None, action: str, content: str | None = None, answer: str | None = None) -> AsyncIterator[str]:
+        """提交 interrupt 恢复参数并逐行返回下游 SSE。"""
 
         # action 由前端审阅面板产生：approve 接受草稿，edit 提交修改内容，
         # rewrite 要求重新生成，clarify 则把 answer 作为澄清结果恢复图执行。
@@ -137,5 +132,4 @@ class CustomLangGraphService:
         async with client.stream("POST", f"{self.base_url}/api/chat/resume", json=payload) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
-                if line.startswith("data:") and line[5:].strip():
-                    yield json.loads(line[5:].strip())
+                yield line

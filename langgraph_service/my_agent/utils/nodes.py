@@ -300,8 +300,7 @@ def finalize(state: GraphState) -> GraphState:
 # 写作子图包装函数
 # ==============================
 # 由于父图 (GraphState) 和子图 (WritingState) 的状态结构不同，
-# 不能直接把子图作为节点添加到父图。
-# 需要通过包装函数手动调用子图，并进行状态转换。
+# 通过包装函数明确控制父图和子图之间的输入输出边界。
 
 
 async def call_writing_subgraph(state: GraphState) -> dict:
