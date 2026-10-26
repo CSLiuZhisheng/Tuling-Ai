@@ -91,6 +91,7 @@ export const useChatStore = defineStore('chat', () => {
 
   // 用于中止 fetch 请求
   let abortController: AbortController | null = null;
+  let currentReader: ReadableStreamDefaultReader<Uint8Array> | null = null;  // 当前活跃的 reader
   let conversationsRequest: Promise<void> | null = null;
   let historyAbortController: AbortController | null = null;
 
@@ -316,6 +317,7 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       const reader = response.body.getReader();
+      currentReader = reader;  // 保存 reader 引用
       const decoder = new TextDecoder();
       let buffer = '';
       let receivedFirstContent = false;
@@ -399,7 +401,8 @@ export const useChatStore = defineStore('chat', () => {
                 }
                 isLoading.value = false;
                 currentWritingStep.value = '';
-                
+
+                currentReader = null;
                 reader.releaseLock();
                 return;
               } else if (data.type === "content" || data.type === "text") {
@@ -422,6 +425,7 @@ export const useChatStore = defineStore('chat', () => {
           }
         }
       }
+      currentReader = null;
       reader.releaseLock();
 
     } catch (error: any) {
@@ -439,6 +443,7 @@ export const useChatStore = defineStore('chat', () => {
       messages.value.splice(aiMessageIndex, 1);
       throw error;
     } finally {
+      currentReader = null;
       abortController = null;
     }
   };
@@ -514,6 +519,7 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       const reader = response.body.getReader();
+      currentReader = reader;  // 保存 reader 引用
       const decoder = new TextDecoder();
       let buffer = '';
       let receivedFirstContent = false;
@@ -599,6 +605,7 @@ export const useChatStore = defineStore('chat', () => {
           }
         }
       }
+      currentReader = null;
       reader.releaseLock();
 
     } catch (error: any) {
@@ -616,6 +623,7 @@ export const useChatStore = defineStore('chat', () => {
       throw error;
     } finally {
       isLoading.value = false;
+      currentReader = null;
       abortController = null;
     }
   };
@@ -623,16 +631,27 @@ export const useChatStore = defineStore('chat', () => {
   // 暂停流式响应
   const pauseStream = () => {
     isPaused.value = true;
-    
+
+    // 先释放 reader 锁，避免连接挂起
+    if (currentReader) {
+      try {
+        currentReader.cancel('用户主动停止');  // 取消读取流
+        currentReader.releaseLock();  // 释放锁
+      } catch (e) {
+        console.warn('释放 reader 失败:', e);
+      }
+      currentReader = null;
+    }
+
     // 中止前端的 fetch 请求，后端会自动检测到并取消 LangGraph 任务
     if (abortController) {
       abortController.abort();
       abortController = null;
     }
-    
+
     isLoading.value = false;
     currentWritingStep.value = '';
-    
+
     // 重置所有消息的写作状态
     messages.value.forEach(msg => {
       if (msg.isWriting) {
@@ -698,6 +717,7 @@ export const useChatStore = defineStore('chat', () => {
       }
 
       const reader = response.body.getReader();
+      currentReader = reader;  // 保存 reader 引用
       const decoder = new TextDecoder();
       let buffer = '';
       let receivedFirstContent = false;
@@ -781,6 +801,7 @@ export const useChatStore = defineStore('chat', () => {
           }
         }
       }
+      currentReader = null;
       reader.releaseLock();
 
     } catch (error: any) {
@@ -797,6 +818,7 @@ export const useChatStore = defineStore('chat', () => {
       throw error;
     } finally {
       isLoading.value = false;
+      currentReader = null;
       abortController = null;
     }
   };

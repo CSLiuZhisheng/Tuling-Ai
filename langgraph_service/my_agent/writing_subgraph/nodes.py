@@ -22,9 +22,10 @@
 """
 
 import logging
-from typing import Literal
+from typing import Literal, Any
 
 from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
+from langchain_core.messages.utils import count_tokens_approximately
 from langchain_openai import ChatOpenAI
 from langgraph.types import interrupt
 
@@ -49,6 +50,70 @@ def get_llm() -> ChatOpenAI:
         base_url=Settings.API_BASE_URL,
         temperature=Settings.TEMPERATURE,
     )
+
+
+def _log_writing_state(state: WritingState, node_name: str) -> None:
+    """记录写作子图状态，用于调试和监控。
+
+    Args:
+        state: 当前写作状态
+        node_name: 节点名称
+    """
+    print(f"\n{'='*80}")
+    print(f"[写作子图-{node_name}] 状态分析")
+    print(f"{'='*80}")
+
+    # 分析消息历史
+    messages = state.get("messages", [])
+    if messages:
+        print(f"\n📊 消息历史:")
+        print(f"  - 消息数量: {len(messages)}")
+
+        total_tokens = 0
+        by_type: dict[str, int] = {}
+
+        for idx, msg in enumerate(messages):
+            msg_type = getattr(msg, "type", "unknown") if not isinstance(msg, dict) else msg.get("type", "unknown")
+            content = getattr(msg, "content", "") if not isinstance(msg, dict) else msg.get("content", "")
+            content_str = str(content)
+            tokens = count_tokens_approximately(content_str)
+            total_tokens += tokens
+
+            by_type[msg_type] = by_type.get(msg_type, 0) + 1
+
+            # 前3条和后3条打印详情
+            if idx < 3 or idx >= len(messages) - 3:
+                preview = content_str[:100] + "..." if len(content_str) > 100 else content_str
+                print(f"  [{idx}] {msg_type:15s} | {tokens:5d} tokens | {preview}")
+            elif idx == 3:
+                print(f"  ... (省略 {len(messages) - 6} 条消息)")
+
+        print(f"\n  类型分布: {by_type}")
+        print(f"  总 Token 数: {total_tokens}")
+
+    # 打印写作相关状态
+    print(f"\n📝 写作状态:")
+
+    state_items = [
+        ("query", "原始需求"),
+        ("requirements", "需求分析"),
+        ("research_notes", "参考资料"),
+        ("outline", "文章大纲"),
+        ("draft", "草稿内容"),
+        ("review_feedback", "审核反馈"),
+        ("human_action", "用户操作"),
+    ]
+
+    for key, label in state_items:
+        value = state.get(key)
+        if value:
+            value_str = str(value)
+            tokens = count_tokens_approximately(value_str)
+            preview = value_str[:100] + "..." if len(value_str) > 100 else value_str
+            print(f"  - {label}: {len(value_str)} 字符 / {tokens} tokens")
+            print(f"    内容: {preview}")
+
+    print(f"\n{'='*80}\n")
 
 
 # ==============================
@@ -283,6 +348,9 @@ async def outline(state: WritingState) -> WritingState:
     - 每个章节标注大致字数
     - 逻辑连贯，结构完整
     """
+    # 🔍 添加状态分析日志
+    _log_writing_state(state, "outline")
+
     requirements = state.get("requirements", "")
     research_notes = state.get("research_notes", "")
     logger.info(f"[outline] 开始大纲规划 | 需求={requirements[:50]}...，资料长度={len(research_notes)}")
@@ -321,6 +389,9 @@ async def draft(state: WritingState) -> WritingState:
     - 内容充实，有理有据
     - 使用 Markdown 格式（标题、列表、加粗等）
     """
+    # 🔍 添加状态分析日志
+    _log_writing_state(state, "draft")
+
     outline_text = state.get("outline", "")
     requirements = state.get("requirements", "")
     research_notes = state.get("research_notes", "")

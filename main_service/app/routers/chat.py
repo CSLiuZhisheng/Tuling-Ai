@@ -251,7 +251,7 @@ async def chat_query(
             query=req.query,
             knowledge_bool=req.knowledge_bool,
         )
-        
+
         # 检测是否是 interrupt（人机交互）
         if result.get("is_interrupt"):
             return ChatResponse(
@@ -263,7 +263,7 @@ async def chat_query(
                 conversation_id=conversation_id,
                 is_interrupt=True,
             )
-        
+
         return ChatResponse(
             messages=ChatMessage(
                 role="ai",
@@ -330,7 +330,7 @@ async def chat_query_stream(
                     logger.info(f"[CLIENT DISCONNECTED] 用户 {current_user.username} 断开连接，取消正在运行的任务")
                     await svc.cancel_runs(thread_id=current_user.id, conversation_id=conversation_id)
                     break
-                
+
                 # v2 格式：{"type": "...", "ns": [...], "data": ...}。
                 # metadata/partial/updates 是 SDK 事件，不是最终前端协议。
                 event_type = event.get("type", "")
@@ -343,7 +343,7 @@ async def chat_query_stream(
                             sources = node_output.get("sources", [])
                             if sources:
                                 final_sources = sources
-                            
+
                             # 检查是否有 answer 内容需要发送
                             answer = node_output.get("answer", "")
                             if (
@@ -353,14 +353,14 @@ async def chat_query_stream(
                             ):
                                 # updates 仅作为没有 token 流事件时的兜底，避免重复发送完整答案
                                 yield sse_event("content", content=answer, is_display=True)
-                    
+
                     if "__interrupt__" in event_data:
                         interrupt_data = normalize_interrupt_payload(event_data["__interrupt__"])
                         # 发送会话 ID
                         yield sse_event("conversation_id", content=conversation_id)
                         yield sse_event("interrupt", content=interrupt_data)
                         return
-                
+
                 # metadata 只负责确定当前节点和发送进度事件，不把 metadata
                 # 中的内部运行信息直接暴露给前端。
                 if event_type == "messages/metadata" and isinstance(event_data, dict):
@@ -381,14 +381,14 @@ async def chat_query_stream(
                                         is_display=node_name in DISPLAY_NODES,
                                     )
                     continue
-                
+
                 # partial 才是 token/累计文本流。根据当前节点选择 article
                 # （草稿）或 content（最终对话答案）协议。
                 if event_type == "messages/partial":
                     # current_node 为空时，不发送 content 事件
                     if not current_node:
                         continue
-                    
+
                     # draft 节点的内容使用 article 事件类型发送
                     if current_node == 'draft':
                         if isinstance(event_data, list):
@@ -400,7 +400,7 @@ async def chat_query_stream(
                                             delta = content[len(prev_content):]
                                         else:
                                             delta = content
-                                        
+
                                         if delta:
                                             yield sse_event("article", content=delta)
                                         prev_content = content
@@ -415,7 +415,7 @@ async def chat_query_stream(
                                             delta = content[len(prev_content):]
                                         else:
                                             delta = content
-                                        
+
                                         if delta:
                                             yield sse_event("content", content=delta, is_display=True)
                                             streamed_display_nodes.add(current_node)
@@ -572,10 +572,10 @@ async def chat_resume_stream(
                     logger.info(f"[CLIENT DISCONNECTED] 用户 {current_user.username} 断开连接，取消正在运行的任务")
                     await svc.cancel_runs(thread_id=current_user.id, conversation_id=req.conversation_id)
                     break
-                
+
                 event_type = event.get("type", "")
                 event_data = event.get("data", {})
-                
+
                 # 检测 interrupt 事件（resume 后可能再次遇到人机交互）
                 if event_type == "updates" and isinstance(event_data, dict):
                     for node_name, node_output in event_data.items():
@@ -613,7 +613,7 @@ async def chat_resume_stream(
                     # current_node 为空时，不发送 content 事件
                     if not current_node:
                         continue
-                    
+
                     # draft 节点的内容使用 article 事件类型发送
                     if current_node == 'draft':
                         if isinstance(event_data, list):

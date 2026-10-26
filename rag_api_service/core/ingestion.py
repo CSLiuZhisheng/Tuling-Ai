@@ -19,6 +19,7 @@ from llama_index.storage.docstore.redis import RedisDocumentStore
 from llama_index.storage.index_store.redis import RedisIndexStore
 from llama_index.storage.kvstore.redis import RedisKVStore as RedisCache
 import chromadb
+from redis import Redis
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.llms.dashscope import DashScope
 from config.settings import Settings as AppSettings
@@ -68,16 +69,48 @@ class DocumentIngestionPipeline:
             device="cuda" if torch.cuda.is_available() else "cpu",
         )
 
+    def _get_redis_kwargs(self) -> dict:
+        """
+        构建 Redis 连接参数的辅助方法。
+
+        将重复的 redis_kwargs 构建逻辑提取为独立方法，避免在
+        _initialize_storage_components、_create_pipelines、
+        _create_custom_pipelines 中重复相同代码。
+
+        Returns:
+            dict: Redis 连接参数字典，包含 host、port，以及可选的 password
+        """
+        redis_kwargs = {
+            "host": AppSettings.REDIS_HOST,
+            "port": AppSettings.REDIS_PORT,
+        }
+        # 只有密码非空时才添加 password 参数
+        if AppSettings.REDIS_PASSWORD:
+            redis_kwargs["password"] = AppSettings.REDIS_PASSWORD
+        return redis_kwargs
+
     def _initialize_storage_components(self):
         """初始化存储组件"""
-        # 初始化索引存储
-        self.redis_index_store = RedisIndexStore.from_host_and_port(
-            host="127.0.0.1", port=6379, namespace="redis_index"
+        # 准备 Redis 连接参数
+        redis_kwargs = self._get_redis_kwargs()
+
+        # 创建底层Redis客户端（支持密码）
+        redis_client = Redis(**redis_kwargs)
+
+        # 创建RedisKVStore实例用于索引存储
+        redis_kvstore_index = RedisCache(redis_client=redis_client)
+        self.redis_index_store = RedisIndexStore(
+            redis_kvstore=redis_kvstore_index,
+            namespace="redis_index"
         )
-        # 初始化文档存储
-        self.redis_document_store = RedisDocumentStore.from_host_and_port(
-            host="127.0.0.1", port=6379, namespace="redis_docs"
+
+        # 创建RedisKVStore实例用于文档存储
+        redis_kvstore_docs = RedisCache(redis_client=redis_client)
+        self.redis_document_store = RedisDocumentStore(
+            redis_kvstore=redis_kvstore_docs,
+            namespace="redis_docs"
         )
+
         # 初始化向量存储
         self._create_chroma_db()
 
@@ -89,12 +122,19 @@ class DocumentIngestionPipeline:
 
     def _create_pipelines(self):
         """创建不同类型的摄取管道"""
+        # 准备 Redis 连接参数
+        redis_kwargs = self._get_redis_kwargs()
+
+        # 创建Redis客户端和缓存
+        redis_client = Redis(**redis_kwargs)
+        redis_cache = RedisCache(redis_client=redis_client)
+
         # 通用配置
         common_config = {
             "vector_store": self.chroma_vector_store,
             "docstore": self.redis_document_store,
             "cache": IngestionCache(
-                cache=RedisCache.from_host_and_port("localhost", 6379),
+                cache=redis_cache,
                 collection="redis_cache",
             ),
             "docstore_strategy": DocstoreStrategy.UPSERTS_AND_DELETE
@@ -138,11 +178,18 @@ class DocumentIngestionPipeline:
 
     def _create_custom_pipelines(self, chunk_size: int, chunk_overlap: int):
         """使用自定义分块参数创建临时管道"""
+        # 准备 Redis 连接参数
+        redis_kwargs = self._get_redis_kwargs()
+
+        # 创建Redis客户端和缓存
+        redis_client = Redis(**redis_kwargs)
+        redis_cache = RedisCache(redis_client=redis_client)
+
         common_config = {
             "vector_store": self.chroma_vector_store,
             "docstore": self.redis_document_store,
             "cache": IngestionCache(
-                cache=RedisCache.from_host_and_port("localhost", 6379),
+                cache=redis_cache,
                 collection="redis_cache",
             ),
             "docstore_strategy": DocstoreStrategy.UPSERTS_AND_DELETE
@@ -316,7 +363,9 @@ class DocumentIngestionPipeline:
         try:
             # 尝试获取索引列表
             index_store = self.storage_context.index_store
-            index_ids = index_store.list_indexes()
+            # 修复：RedisIndexStore使用index_structs()而不是list_indexes()
+            index_structs = index_store.index_structs()
+            index_ids = list(index_structs.keys()) if index_structs else []
 
             if not index_ids:
                 logger.info("未找到任何已有索引，将创建新索引")

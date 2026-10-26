@@ -101,6 +101,7 @@ class CustomLangGraphService:
         client = await self._get_client()
         response = await client.get(f"{self.base_url}/api/conversations/{conversation_id}/history", params={"user_id": str(thread_id)})
         response.raise_for_status()
+        print(response.json())
         return response.json().get("messages", [])
 
     async def clear_history(self, *, thread_id: str, conversation_id: str | None = None) -> None:

@@ -41,69 +41,89 @@ from my_agent.utils.state import GraphState
 
 
 async def load_long_term_memory(state: GraphState) -> dict[str, Any]:
-    """在当前轮开始前读取用户的长期记忆。
+    “””
+    使用统一的 MemoryClient 加载长期记忆（V2 增强版）
 
-    ``state`` 是 LangGraph 当前节点看到的完整图状态，类型标注为 ``GraphState``。
-    返回值 ``dict[str, Any]`` 是“本节点对状态的增量更新”，不是要求节点返回完整
-    状态；LangGraph 会把返回的字段合并回当前 state。
+    改进点：
+    1. 使用独立的 memory_service 包
+    2. 支持向量检索，只加载最相关的记忆
+    3. 标注重要性和相似度，帮助模型判断权重
+    “””
+    from memory_service.client import MemoryClient
 
-    ``AsyncPostgresStore`` 的 namespace 使用 ``(memories, user_id)``，因此同一个
-    用户的不同 thread 可以共享长期记忆，而不同用户之间不会互相读取数据。
-    读取结果被转换成 ``SystemMessage``，加入本轮图状态的 messages 中，后续摘要
-    节点和 Agent 节点就可以像处理普通上下文一样使用这些记忆。
+    user_id = str(state.get(“user_id”) or “default”)
 
-    注意：这里不把长期记忆写回 ``context``。``context`` 是原图中
-    ``SummarizationNode`` 使用的短期摘要结构，直接混用会破坏原有摘要逻辑。
-    """
-    # user_id 来自 main_service 的业务身份，而不是本轮消息内容；只有用它
-    # 作为 namespace，才能让同一用户跨会话复用记忆，同时隔离不同用户。
-    user_id = str(state.get("user_id") or "default")
-    # namespace 是长期记忆的逻辑分区。它与 thread_id 有意不同：thread_id
-    # 只代表一个会话，user_id 让同一用户的多个会话共享可复用记忆。
+    # 提取当前用户问题
+    current_query = “”
+    messages = state.get(“messages”, [])
+    if messages:
+        last_message = messages[-1]
+        message_type = getattr(last_message, “type”, None)
+        if message_type == “human”:
+            current_query = str(getattr(last_message, “content”, “”))
+
+    if not current_query:
+        return {}
+
+    # 使用统一的 MemoryClient
     store = get_store()
-    items = await store.asearch(("memories", user_id), limit=10)
-    if not items:
+    memory_client = MemoryClient(store=store)
+
+    # 使用向量检索找到最相关的记忆
+    memories = await memory_client.search_memories(
+        user_id=user_id,
+        query=current_query,
+        limit=5,  # 只取最相关的5条
+        min_importance=5,  # 只加载重要记忆
+        use_vector_search=True
+    )
+
+    if not memories:
         return {}
 
     lines: list[str] = []
-    for item in items:
-        value = getattr(item, "value", item)
-        if not isinstance(value, dict):
-            continue
-        query = str(value.get("query") or "").strip()
-        answer = str(value.get("answer") or "").strip()
-        if query or answer:
-            # 每条记忆保留问答边界，模型可以判断哪些历史与当前问题相关，
-            # 也避免把多条记忆拼成无法区分来源的一段文本。
-            lines.append(f"用户曾问：{query}\n助手曾答：{answer}")
+    for memory in memories:
+        query = memory.value.query
+        answer = memory.value.answer
+        importance = memory.value.importance
+        similarity = memory.similarity or 0
+
+        # 标注记忆的重要性和相似度，帮助模型判断权重
+        lines.append(
+            f”[重要性: {importance}/10, 相似度: {similarity:.2f}]\n”
+            f”用户曾问：{query}\n”
+            f”助手曾答：{answer}”
+        )
+
     if not lines:
         return {}
 
     return {
-        "messages": [
+        “messages”: [
             SystemMessage(
-                content="以下是该用户的长期记忆，仅在与当前问题相关时参考：\n"
-                + "\n\n".join(lines)
+                content=”以下是与当前问题最相关的历史记忆，按相关性排序：\n\n”
+                + “\n\n---\n\n”.join(lines)
             )
         ]
     }
 
 
 async def save_long_term_memory(state: GraphState) -> dict[str, Any]:
-    """在当前轮结束后保存本次问答。
-
-    ``state`` 中的 ``messages`` 可能包含 ``HumanMessage`` 对象，也可能是从接口
-    传入后暂时保留的字典，因此代码同时兼容两种格式。
-
-    保存的数据是结构化字典，而不是拼接后的纯文本，便于后续扩展记忆类型、
-    增加时间戳或按字段过滤。``index=False`` 表示当前只使用 namespace 查询，
-    不要求 PostgreSQL 为这些字段建立向量/全文索引。
     """
-    # user_id 由 main_service 通过输入状态传入。兜底值只用于直接调试图时，
-    # 正常请求不应把所有用户都归到 default。
+    使用统一的 MemoryClient 保存记忆（V2 增强版）
+
+    改进点：
+    1. 使用独立的 memory_service 包
+    2. 支持 LLM 评分（可配置）
+    3. 自动去重、分层存储
+    """
+    from memory_service.client import MemoryClient
+    from my_agent.utils.nodes import get_llm
+
     user_id = str(state.get("user_id") or "default")
     query = ""
-    # 从后往前寻找最近一条 HumanMessage，避免把历史问题误当成本轮 query。
+
+    # 从后往前寻找最近一条 HumanMessage
     for message in reversed(state.get("messages", [])):
         message_type = getattr(message, "type", None)
         if message_type == "human" or (
@@ -115,27 +135,26 @@ async def save_long_term_memory(state: GraphState) -> dict[str, Any]:
             query = str(content or "")
             break
 
-    # finalize 已经把下游节点结果统一到 answer 字段，因此这里不需要再次
-    # 判断当前意图或解析 AIMessage，只保存本轮最终业务答案。
     answer = str(state.get("answer") or "").strip()
     if not query and not answer:
         return {}
 
-    # get_store() 获取的是当前 LangGraph 执行上下文中 compile(store=...) 注入的
-    # store，而不是重新创建数据库连接。这样可以复用 FastAPI lifespan 管理的连接。
+    # 使用统一的 MemoryClient
     store = get_store()
-    # 使用随机 key 保存每轮问答，不覆盖同一用户之前的记忆；查询时由
-    # asearch 取回多条记录。这里暂不启用索引，避免把普通对话文本误当成
-    # 向量检索数据，后续需要语义检索时再单独设计 index 配置。
-    await store.aput(
-        ("memories", user_id),
-        str(uuid4()),
-        {
-            "type": "conversation",
-            "query": query,
-            "answer": answer,
-        },
-        index=False,
+
+    # 根据环境变量决定是否使用 LLM 评分
+    use_llm_scoring = os.getenv("MEMORY_USE_LLM_SCORING", "false").lower() == "true"
+    llm = get_llm() if use_llm_scoring else None
+
+    memory_client = MemoryClient(store=store, llm=llm)
+
+    # 智能保存：自动去重 + LLM 评分
+    await memory_client.save_memory(
+        user_id=user_id,
+        query=query,
+        answer=answer,
+        metadata={"type": "conversation"},
+        use_llm_scoring=use_llm_scoring
     )
     return {}
 

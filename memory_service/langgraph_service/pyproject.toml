@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "langgraph-service"
+version = "1.0.0"
+description = "LangGraph 对话服务"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+    {name = "TuLing AI Team"}
+]
+
+dependencies = [
+    # 核心框架
+    "langgraph>=0.2.45",
+    "langgraph-checkpoint-postgres>=2.0.6",
+    "langchain-core>=0.3.15",
+    "langchain-openai>=0.2.9",
+
+    # MCP 相关
+    "mcp>=1.1.2",
+    "langchain-mcp-adapters>=0.1.2",
+
+    # Web 搜索
+    "langchain-tavily>=0.2.0",
+
+    # 记忆管理
+    "langmem>=0.0.30",
+
+    # 数据库
+    "psycopg[binary]>=3.2.3",
+    "asyncpg>=0.29.0",
+
+    # Web 框架
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.31.0",
+    "pydantic>=2.9.2",
+
+    # 工具
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.2",
+    "structlog>=24.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[tool.setuptools]
+packages = ["app", "my_agent", "config"]
+
+[tool.uv]
+# memory-service 通过 editable install 单独安装
+
+[tool.uv.sources]
+# memory-service 已通过 uv pip install -e ../memory_service 安装

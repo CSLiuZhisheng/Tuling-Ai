@@ -14,6 +14,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.chat import router as custom_api_router
+from app.api.memory import router as memory_router
+from app.api.memory_v2 import router as memory_v2_router
 from app.services.graph_runtime import runtime
 
 
@@ -45,8 +47,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 app.include_router(custom_api_router)
+app.include_router(memory_router)
+app.include_router(memory_v2_router)
 # router 内部已经包含 /api 前缀，因此这里不再重复添加前缀。
-# 这样最终接口是 /api/chat、/api/chat/stream、/api/conversations/...。
+# 这样最终接口是 /api/chat、/api/chat/stream、/api/conversations/...、/api/memory/...、/api/memory/v2/...。
 
 
 @app.get("/")

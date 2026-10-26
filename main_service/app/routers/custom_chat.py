@@ -30,6 +30,7 @@ async def startup_custom_chat() -> None:
     await _service.startup()
 
 
+
 async def shutdown_custom_chat() -> None:
     """释放自定义 LangGraph HTTP 连接池。"""
 

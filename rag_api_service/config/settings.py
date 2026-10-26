@@ -42,3 +42,8 @@ class Settings:
 
     HOST: str = os.getenv("RAG_API_HOST", "0.0.0.0")
     PORT: int = int(os.getenv("RAG_API_PORT", "8011"))
+
+    # Redis 配置
+    REDIS_HOST: str = os.getenv("REDIS_HOST", "127.0.0.1")
+    REDIS_PORT: int = int(os.getenv("REDIS_PORT", "6379"))
+    REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD", "")
